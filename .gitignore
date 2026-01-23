@@ -1,0 +1,133 @@
+# =============================================================================
+# CANSLIM Monitor .gitignore
+# Place this file at: C:\Trading\canslim_monitor\.gitignore
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Python
+# -----------------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg
+*.egg-info/
+dist/
+build/
+eggs/
+*.manifest
+*.spec
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+.env
+
+# -----------------------------------------------------------------------------
+# Databases (contain your actual trading data - DO NOT VERSION)
+# -----------------------------------------------------------------------------
+*.db
+*.sqlite
+*.sqlite3
+*.db-shm
+*.db-wal
+*.db-journal
+
+# Database backups with timestamps
+*.backup_*.db
+*_backup_*.db
+
+# -----------------------------------------------------------------------------
+# Manual Backup Files (Git replaces these!)
+# -----------------------------------------------------------------------------
+*.zip
+*.bak
+*.backup
+*.old
+*_backup_*
+*-backup-*
+*Before-*-Fix*
+
+# -----------------------------------------------------------------------------
+# Logs (generated daily, don't version)
+# -----------------------------------------------------------------------------
+logs/
+*.log
+
+# -----------------------------------------------------------------------------
+# Config files with secrets/local settings
+# -----------------------------------------------------------------------------
+config/config_local.yaml
+config/*_secrets.yaml
+config/*_local.yaml
+*_secrets.yaml
+*_local.yaml
+
+# Keep the main config.yaml template
+!config/config.yaml.template
+
+# -----------------------------------------------------------------------------
+# IDE / Editor
+# -----------------------------------------------------------------------------
+.idea/
+*.swp
+*.swo
+*~
+.project
+.pydevproject
+.settings/
+
+# VS Code - exclude most, keep useful settings
+.vscode/*
+!.vscode/settings.json
+!.vscode/launch.json
+!.vscode/extensions.json
+
+# -----------------------------------------------------------------------------
+# OS Generated
+# -----------------------------------------------------------------------------
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+Desktop.ini
+
+# -----------------------------------------------------------------------------
+# Testing
+# -----------------------------------------------------------------------------
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+coverage.xml
+*.cover
+*.py,cover
+
+# -----------------------------------------------------------------------------
+# Temp files
+# -----------------------------------------------------------------------------
+*.tmp
+*.temp
+tmp/
+temp/
+
+# -----------------------------------------------------------------------------
+# Data exports (regenerated, large files)
+# -----------------------------------------------------------------------------
+exports/
+*.csv
+*.xlsx
+!templates/*.xlsx
+
+# -----------------------------------------------------------------------------
+# Imported/migrated data files
+# -----------------------------------------------------------------------------
+*_imported.db
+*_migrated.db

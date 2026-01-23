@@ -1,0 +1,272 @@
+# CANSLIM Scoring Configuration v2.3
+# ===================================
+# Adjust scoring weights without code changes
+# 
+# Based on validation testing (55 cases):
+# - Accuracy: 72.7%
+# - Precision: 77.5%
+# - Recall: 83.8%
+
+version: "2.3"
+
+# =============================================================================
+# RS RATING SCORES
+# =============================================================================
+# Most predictive factor from validation:
+#   RS 90+ = 88% success rate
+#   RS <70 = 27% success rate
+#
+rs_rating:
+  tiers:
+    - name: "Elite"
+      min: 95
+      max: 100
+      score: 5
+    - name: "Excellent"
+      min: 90
+      max: 94
+      score: 4
+    - name: "Good"
+      min: 80
+      max: 89
+      score: 2
+    - name: "Acceptable"
+      min: 70
+      max: 79
+      score: 0
+    - name: "Weak"
+      min: 0
+      max: 69
+      score: -5
+  
+  # RS Floor: Cap grade if RS below threshold
+  floor:
+    enabled: true
+    threshold: 70
+    max_grade: "C"
+
+# =============================================================================
+# PATTERN SCORES
+# =============================================================================
+# Based on IBD pattern quality rankings
+# Canonical pattern names should match constants.py VALID_PATTERNS
+#
+patterns:
+  groups:
+    # Highest quality patterns - Tier A
+    - names: ["cup with handle", "cup w/handle", "cup w/ handle", "cup & handle"]
+      score: 10
+      tier: "A"
+    
+    - names: ["double bottom", "double-bottom", "w bottom"]
+      score: 9
+      tier: "A"
+    
+    # Good patterns - Tier B
+    - names: ["flat base", "flat-base", "flatbase"]
+      score: 8
+      tier: "B"
+    
+    - names: ["high tight flag", "high-tight-flag", "htf"]
+      score: 8
+      tier: "B"
+    
+    - names: ["cup", "cup no handle", "cup without handle"]
+      score: 7
+      tier: "B"
+    
+    - names: ["ascending base", "ascending-base"]
+      score: 7
+      tier: "B"
+    
+    - names: ["ipo base", "ipo-base", "ipobase"]
+      score: 7
+      tier: "B"
+    
+    # Acceptable patterns - Tier C
+    - names: ["consolidation", "consol"]
+      score: 6
+      tier: "C"
+    
+    - names: ["saucer", "saucer base", "saucer-base"]
+      score: 6
+      tier: "C"
+    
+    - names: ["saucer w/handle", "saucer with handle", "saucer w/ handle"]
+      score: 6
+      tier: "C"
+    
+    # Alternative entry patterns - Tier C
+    - names: ["3 weeks tight", "three weeks tight", "3-weeks tight", "3wt"]
+      score: 6
+      tier: "C"
+    
+    - names: ["shakeout +3", "shakeout+3", "shakeout plus 3", "shake out +3"]
+      score: 6
+      tier: "C"
+  
+  # Default for unrecognized patterns
+  default_score: 5
+
+# =============================================================================
+# STAGE SCORES
+# =============================================================================
+# From Jacob's webinar: "probability of huge price moves in first/second 
+# stage is huge... after second stage, it lessens"
+#
+stages:
+  scores:
+    1: 0      # First stage - best odds
+    2: -1     # Second stage - still good
+    3: -4     # Third stage - elevated risk
+    4: -8     # Fourth stage+ - high risk
+  
+  # Base-on-base bonus (resets stage count effectively)
+  base_on_base_bonus: 2
+  
+  # Maximum stage number to apply specific penalty (beyond this uses stage 4 penalty)
+  max_tracked_stage: 4
+
+# =============================================================================
+# DEPTH SCORES
+# =============================================================================
+# Base depth percentage thresholds
+# From Arnie's webinar: Normal corrections 15-30%, deep 30-40%
+#
+depth:
+  tiers:
+    - name: "Normal"
+      max: 25
+      score: 0
+    - name: "Deep"
+      max: 35
+      score: -2
+    - name: "Very Deep"
+      max: 100
+      score: -5
+
+# =============================================================================
+# LENGTH SCORES
+# =============================================================================
+# Base length in weeks
+# Minimum 5-7 weeks for proper base formation
+#
+length:
+  tiers:
+    - name: "Ideal"
+      min: 7
+      score: 1
+    - name: "Acceptable"
+      min: 5
+      score: 0
+    - name: "Short"
+      min: 0
+      score: -1
+
+# =============================================================================
+# GRADE BOUNDARIES
+# =============================================================================
+# Score thresholds for each grade (score >= threshold)
+#
+grades:
+  boundaries:
+    "A+": 20
+    "A": 15
+    "B+": 12
+    "B": 9
+    "C+": 7
+    "C": 5
+    "D": 3
+    "F": -999  # Catch-all for anything below D
+
+# =============================================================================
+# EXECUTION RISK THRESHOLDS
+# =============================================================================
+# Based on IBD guidelines for institutional-quality stocks
+#
+execution:
+  # Average Daily Volume thresholds
+  volume:
+    pass: 500000       # IBD preferred minimum
+    caution: 400000    # IBD absolute minimum
+  
+  # Bid/Ask spread thresholds (as percentage)
+  spread:
+    tight: 0.10        # Excellent liquidity
+    normal: 0.30       # Acceptable
+    wide: 0.50         # Caution
+  
+  # Position size as % of ADV
+  position_impact:
+    low: 1.0           # No market impact
+    moderate: 2.0      # Minor impact possible
+    high: 5.0          # Significant impact likely
+
+# =============================================================================
+# POSITION SIZING BY GRADE
+# =============================================================================
+# Percentage of portfolio to allocate based on setup grade
+#
+position_sizing:
+  default_portfolio_value: 100000
+  
+  allocations:
+    "A+": 0.50    # 50% = $50,000 position
+    "A": 0.50
+    "B+": 0.30    # 30% = $30,000 position
+    "B": 0.30
+    "C+": 0.20    # 20% = $20,000 position
+    "C": 0.20
+    "D": 0.00     # No position
+    "F": 0.00
+
+# =============================================================================
+# DYNAMIC SCORING (Technical Indicators)
+# =============================================================================
+# These are calculated from price/volume data if available
+#
+dynamic_indicators:
+  # Up/Down Volume Ratio (50-day)
+  up_down_ratio:
+    enabled: true
+    tiers:
+      - name: "Strong Accumulation"
+        min: 1.5
+        score: 3
+      - name: "Good Demand"
+        min: 1.25
+        score: 2
+      - name: "Acceptable"
+        min: 1.0
+        score: 1
+      - name: "Neutral"
+        min: 0
+        score: 0
+  
+  # 50-MA Position
+  ma_position:
+    enabled: true
+    above_score: 2
+    at_score: 1
+    below_score: -1
+  
+  # 10-Week Support Bounces
+  support_bounces:
+    enabled: true
+    max_score: 2
+    points_per_bounce: 1
+  
+  # RS Line Trend
+  rs_trend:
+    enabled: true
+    new_high_score: 2
+    uptrend_score: 1
+    flat_score: 0
+    downtrend_score: -1
+  
+  # Volume Dry-Up in Base
+  volume_dryup:
+    enabled: true
+    strong_score: 2
+    moderate_score: 1
+    none_score: 0

@@ -1,0 +1,80 @@
+# =============================================================================
+# POSITION MONITORING CONFIGURATION
+# =============================================================================
+# Add this section to your user_config.yaml file
+# Location: canslim_monitor/user_config.yaml
+# 
+# Insert after the distribution_days section
+# =============================================================================
+
+# Position Monitoring Configuration
+position_monitoring:
+  # Stop Loss Settings
+  stop_loss:
+    base_pct: 7.0              # Base stop percentage for Stage 1
+    warning_buffer_pct: 2.0    # Warning when within this % of stop
+    # Stage multipliers (later stages = tighter stops)
+    stage_multipliers:
+      1: 1.00    # Stage 1: Full 7% stop
+      2: 0.85    # Stage 2: ~6% stop  
+      3: 0.70    # Stage 3: ~5% stop
+      4: 0.60    # Stage 4: ~4.2% stop
+      5: 0.50    # Stage 5: ~3.5% stop
+  
+  # Trailing Stop (activates after significant gain)
+  trailing_stop:
+    activation_pct: 15.0       # Activate at 15% gain
+    trail_pct: 8.0             # Trail by 8% from high
+  
+  # Pyramid Zones
+  pyramid:
+    py1_min_pct: 0.0           # PY1 zone: 0-5% above entry
+    py1_max_pct: 5.0
+    py2_min_pct: 5.0           # PY2 zone: 5-10% above entry
+    py2_max_pct: 10.0
+    min_bars_since_entry: 2    # Wait 2 bars before pyramid alerts
+    pullback_ema_tolerance: 1.0  # 1% tolerance for 21 EMA touch
+  
+  # 8-Week Hold Rule (IBD methodology)
+  eight_week_hold:
+    gain_threshold_pct: 20.0   # 20% gain to trigger
+    trigger_window_days: 21    # Within 3 weeks of breakout
+    hold_weeks: 8              # Hold for 8 weeks total
+  
+  # Technical Sell Rules
+  technical:
+    ma_50_warning_pct: 2.0     # Warning when within 2% of 50 MA
+    ma_50_volume_confirm: 1.5  # Volume ratio for 50 MA sell (IBD gap fix)
+    ema_21_consecutive_days: 2 # Days below 21 EMA for late-stage sell
+  
+  # Health Monitoring
+  health:
+    time_threshold_days: 60    # Days without progress
+    tp1_progress_threshold: 0.5  # Should achieve 50% of TP1
+    deep_base_threshold: 35.0  # Base depth % considered "too deep"
+    ud_ratio_warning: 0.8      # U/D ratio below this = warning
+  
+  # Earnings Alerts
+  earnings:
+    warning_days: 14           # Alert 14 days before
+    critical_days: 5           # Urgent alert 5 days before
+    negative_threshold: 0.0    # P&L % below which = SELL before earnings
+    reduce_threshold: 10.0     # P&L % below which = REDUCE before earnings
+  
+  # Alert Cooldowns (minutes)
+  cooldowns:
+    hard_stop: 0               # Immediate - no cooldown
+    stop_warning: 120          # 2 hours
+    trailing_stop: 0           # Immediate
+    tp1: 1440                  # 24 hours
+    tp2: 1440                  # 24 hours
+    eight_week_hold: 10080     # 1 week
+    pyramid: 240               # 4 hours
+    ma_50_warning: 1440        # 24 hours
+    ma_50_sell: 1440           # 24 hours
+    ema_21_sell: 1440          # 24 hours
+    ten_week_sell: 10080       # 1 week
+    health_warning: 60         # 1 hour
+    health_critical: 60        # 1 hour
+    earnings: 1440             # 24 hours
+    late_stage: 10080          # 1 week

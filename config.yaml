@@ -1,0 +1,127 @@
+# CANSLIM Monitor - Default Configuration
+# Phase 1: Database Foundation
+#
+# This file contains default configuration values.
+# Copy to user_config.yaml and modify as needed.
+
+# Service Settings
+service:
+  poll_intervals:
+    breakout: 60      # seconds
+    position: 30
+    market: 300
+  market_hours_only: true
+  market_open: "09:30"
+  market_close: "16:00"
+  timezone: "America/New_York"
+
+# Logging Settings
+logging:
+  base_dir: "C:/Trading/CANSLIM Watch List Monitor/logs"
+  level: DEBUG        # DEBUG, INFO, WARNING, ERROR, CRITICAL
+  retention_days: 30
+  console_level: INFO
+  categories:
+    service: DEBUG
+    breakout: DEBUG
+    position: DEBUG
+    market: DEBUG
+    ibkr: DEBUG
+    discord: DEBUG
+    sheets: DEBUG
+    database: INFO
+    gui: INFO
+
+# IBKR TWS Connection
+ibkr:
+  host: "127.0.0.1"
+  port: 4001          # 7497=TWS paper, 7496=live, 4001=IB Gateway paper, 4002=IB Gateway live
+  client_id_base: 10
+  timeout: 30
+  max_retries: 3
+
+# Discord Webhooks
+discord:
+  webhooks:
+    breakout: "https://discord.com/api/webhooks/1460680721407414415/Fmk0y1pMyFR8oAgRJxeXGiNWZ6naLT_kKPVrRT8EIVjh1cioDsZ9emOwJvorRHkKAax2"      # Fill in your webhook URL
+    position: "https://discord.com/api/webhooks/1460680839280197835/XdJY7MnYCN0KJmV2HxkbBhGYLkfeUp0eco7bNDA65gih9NCoDAjHHF6x8DthhwmHkMLN"
+    market: "https://discord.com/api/webhooks/1460680942484979939/3mLJt0EHooCbO5c-TNqBNsZH1xSIp4wgFRFUxbT-vljJDMHF1Drfiw_4VUEyrZe2eKUT"
+    system: "https://discord.com/api/webhooks/1460681028111958191/MmyX6z70XyQurSGTdJ4HXxBaFs7a-yc8mRcTvmdxCwr4TX3I65WazxizZfnQ6MBTaawJ"
+  rate_limit: 30      # messages per minute
+
+# Google Sheets Integration
+google_sheets:
+  enabled: true
+  spreadsheet_id: ""  # Fill in your spreadsheet ID
+  sheet_name: "Positions"
+  sync_interval: 300  # seconds
+
+# Polygon.io / Massive API
+polygon:
+  api_key: ""         # Fill in your API key
+  base_url: "https://api.polygon.io"
+  timeout: 30
+
+# CANSLIM Scoring Configuration
+scoring:
+  use_learned_weights: false
+  rs_floor: 70        # RS Rating below this caps grade at C
+  
+  # Default weights (adjusted by learning system)
+  weights:
+    # Pattern/Setup
+    pattern_base_type: 10       # Cup w/Handle, Double Bottom, etc.
+    stage_adjustment: -5        # Penalty for late-stage bases
+    base_depth: -3              # Penalty for excessive depth
+    base_length: 2              # Bonus for longer bases
+    prior_uptrend: 3            # Bonus for strong prior uptrend
+    
+    # CANSLIM Factors
+    rs_rating: 4                # Points per 10 RS above 80
+    rs_90_plus: 5               # Bonus for RS 90+
+    rs_95_plus: 8               # Bonus for RS 95+
+    eps_rating: 2               # Points per 10 EPS above 80
+    comp_rating: 1              # Points per 10 Composite above 80
+    ad_rating_bonus: 5          # Bonus for A-B A/D rating
+    ad_rating_penalty: -8       # Penalty for D-E A/D rating
+    
+    # Volume
+    ud_vol_ratio: 3             # Bonus for positive U/D ratio
+    volume_at_pivot: 5          # Bonus for volume surge at pivot
+    
+    # Market Context
+    market_bullish: 3           # Bonus in bullish market
+    market_bearish: -5          # Penalty in bearish market
+  
+  # Grade thresholds
+  thresholds:
+    A_plus: 25
+    A: 18
+    B: 10
+    C: 0    # Below 10
+
+# Alert Configuration
+alerts:
+  cooldown_minutes: 60
+  breakout:
+    volume_threshold: 1.5       # Volume ratio for confirmation
+    buy_zone_pct: 5             # Maximum % above pivot
+    approaching_pct: 2          # Alert when within this % of pivot
+  position:
+    stop_warning_pct: 2         # Warn when this close to stop
+    pyramid_min_bars: 2         # Minimum bars before pyramid alert
+
+# Database Settings
+database:
+  path: "canslim_positions.db"
+  backup_interval: 86400        # Daily backup (seconds)
+  backup_retain: 7              # Keep 7 backups
+
+# Position Management
+position_management:
+  default_stop_pct: 7.0         # Default hard stop percentage
+  default_tp1_pct: 20.0         # First profit target
+  default_tp2_pct: 30.0         # Second profit target
+  pyramid_1_pct: 2.5            # First pyramid point (above entry)
+  pyramid_2_pct: 5.0            # Second pyramid point (above entry)
+  max_extension_pct: 10.0       # Maximum buy zone extension

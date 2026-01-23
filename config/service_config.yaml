@@ -1,0 +1,71 @@
+# CANSLIM Monitor Service Configuration
+# Version: 1.0
+# 
+# This file configures the service behavior. Changes take effect:
+# - On service restart, OR
+# - Via IPC reload_config command (no restart needed)
+#
+# Copy this file to your working directory and customize as needed.
+
+# ============================================================
+# SERVICE THREAD SETTINGS
+# ============================================================
+service:
+  # Poll intervals (seconds) for each monitoring thread
+  poll_interval_breakout: 60    # How often to check watchlist for breakouts
+  poll_interval_position: 30    # How often to check active positions
+  poll_interval_market: 300     # How often to update market regime (5 min)
+  
+  # Market hours behavior
+  market_hours_only: true       # Only run during market hours
+  timezone: America/New_York    # Timezone for market hours calculation
+  market_open: "09:30"          # Market open time (HH:MM)
+  market_close: "16:00"         # Market close time (HH:MM)
+
+# ============================================================
+# IBKR CONNECTION SETTINGS
+# ============================================================
+ibkr:
+  host: 127.0.0.1
+  port: 7497                    # TWS: 7497 (paper) / 7496 (live)
+                                # Gateway: 4001 (paper) / 4002 (live)
+  client_id: 10                 # Base client ID (threads get +1, +2, +3)
+  timeout: 10                   # Connection timeout seconds
+
+# ============================================================
+# DISCORD NOTIFICATION SETTINGS
+# ============================================================
+discord:
+  enabled: true
+  
+  # Channel-specific webhooks (optional)
+  webhooks:
+    breakout: ""                # Webhook URL for breakout alerts
+    position: ""                # Webhook URL for position alerts  
+    market: ""                  # Webhook URL for market regime alerts
+    system: ""                  # Webhook URL for system alerts
+  
+  # Default webhook (used if channel-specific not set)
+  default_webhook: ""           # Your Discord webhook URL here
+
+# ============================================================
+# ALERT SETTINGS
+# ============================================================
+alerts:
+  cooldown_minutes: 60          # Minutes before re-alerting same symbol
+  volume_threshold: 1.5         # Volume must be 1.5x average for confirmation
+  buy_zone_pct: 5.0             # Percentage above pivot = extended (not in buy zone)
+
+# ============================================================
+# SCORING ENGINE SETTINGS
+# ============================================================
+scoring:
+  config_path: null             # Path to scoring_config.yaml (null = use defaults)
+  rs_floor: 70                  # RS Rating below this caps grade at C
+  use_learned_weights: false    # Use ML-derived weights (future feature)
+
+# ============================================================
+# DATABASE SETTINGS
+# ============================================================
+database:
+  path: canslim_positions.db    # SQLite database file path

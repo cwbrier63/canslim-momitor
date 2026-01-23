@@ -1,0 +1,45 @@
+# CANSLIM Monitor - Requirements
+# Phase 1: Database Foundation
+# Phase 2: Service Architecture
+# Phase 3: GUI & Migration
+
+# Core dependencies
+sqlalchemy>=2.0.0
+pyyaml>=6.0
+
+# Timezone support
+pytz>=2023.3
+
+# GUI Framework
+PyQt6>=6.5.0
+
+# Excel import/export
+openpyxl>=3.1.0
+
+# Windows service (Windows only)
+pywin32>=306; sys_platform == 'win32'
+
+# HTTP requests (for Discord integration)
+requests>=2.31.0
+
+# Scheduling
+apscheduler>=3.10.0
+
+# Google Sheets integration (optional, for sync)
+google-api-python-client>=2.100.0
+google-auth-httplib2>=0.1.0
+google-auth-oauthlib>=1.1.0
+
+# Interactive Brokers
+ib_insync>=0.9.86
+
+# Development/Testing
+pytest>=7.4.0
+pytest-cov>=4.1.0
+
+# Type checking (optional)
+mypy>=1.5.0
+
+# Linting (optional)
+flake8>=6.1.0
+black>=23.9.0
