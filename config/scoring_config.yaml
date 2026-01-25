@@ -135,6 +135,9 @@ stages:
 #
 depth:
   tiers:
+    - name: "Shallow"
+      max: 15
+      score: 1
     - name: "Normal"
       max: 25
       score: 0
@@ -227,6 +230,7 @@ position_sizing:
 #
 dynamic_indicators:
   # Up/Down Volume Ratio (50-day)
+  # Scoring from indicators.py calculate_up_down_volume_ratio()
   up_down_ratio:
     enabled: true
     tiers:
@@ -234,14 +238,17 @@ dynamic_indicators:
         min: 1.5
         score: 3
       - name: "Good Demand"
-        min: 1.25
+        min: 1.2
         score: 2
       - name: "Acceptable"
-        min: 1.0
+        min: 1.1
         score: 1
       - name: "Neutral"
-        min: 0
+        min: 0.9
         score: 0
+      - name: "Distribution"
+        min: 0
+        score: -2
   
   # 50-MA Position
   ma_position:
