@@ -343,11 +343,12 @@ class ScoringEngine:
         # Check for base-on-base indicator
         has_bob = '(' in stage_str or 'b' in stage_str
         
-        # Extract numeric stage
-        stage_clean = ''.join(c for c in stage_str.split('(')[0] if c.isdigit())
-        
+        # Extract numeric stage (keep decimal point to handle "1.0", "2.0", etc.)
+        stage_clean = ''.join(c for c in stage_str.split('(')[0] if c.isdigit() or c == '.')
+
         try:
-            stage_num = int(stage_clean) if stage_clean else 1
+            # Parse as float first to handle decimals, then get integer part
+            stage_num = int(float(stage_clean)) if stage_clean else 1
         except ValueError:
             stage_num = 2
         

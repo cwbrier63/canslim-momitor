@@ -616,11 +616,12 @@ class CANSLIMScorer:
             base_on_base = True
             stage_str = stage_str.split("(")[0].strip()
         
-        # Remove letters (like 'b' in '2b')
-        stage_clean = ''.join(c for c in stage_str if c.isdigit())
-        
+        # Remove letters (like 'b' in '2b'), but keep digits and decimal point
+        stage_clean = ''.join(c for c in stage_str if c.isdigit() or c == '.')
+
         try:
-            stage_num = int(stage_clean) if stage_clean else 1
+            # Parse as float first to handle "1.0", "2.0", etc., then get integer part
+            stage_num = int(float(stage_clean)) if stage_clean else 1
         except ValueError:
             stage_num = 2
         
