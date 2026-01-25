@@ -16,6 +16,9 @@ PyQt6>=6.5.0
 # Excel import/export
 openpyxl>=3.1.0
 
+# Word document generation (for reports)
+python-docx>=1.0.0
+
 # Windows service (Windows only)
 pywin32>=306; sys_platform == 'win32'
 

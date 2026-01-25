@@ -758,7 +758,17 @@ class KanbanMainWindow(QMainWindow):
         self.price_timer = QTimer()
         self.price_timer.timeout.connect(self._update_prices)
         self.price_update_interval = 5000  # 5 seconds
-        
+
+        # Google Sheets auto-sync timer
+        self.auto_sync_timer = QTimer()
+        self.auto_sync_timer.timeout.connect(self._auto_sync_check)
+        sheets_config = self.config.get('google_sheets', {})
+        auto_sync_enabled = sheets_config.get('auto_sync', False)
+        sync_interval = sheets_config.get('sync_interval', 300)  # Default 5 minutes
+        if auto_sync_enabled:
+            self.auto_sync_timer.start(sync_interval * 1000)  # Convert to milliseconds
+            self.logger.info(f"Auto-sync enabled: checking every {sync_interval} seconds")
+
         # Cached index stats for persistence between price updates
         self._cached_spy_stats = {}
         self._cached_qqq_stats = {}
@@ -847,11 +857,15 @@ class KanbanMainWindow(QMainWindow):
         file_menu.addAction(export_action)
         
         file_menu.addSeparator()
-        
+
         sync_action = QAction("&Sync to Google Sheets", self)
         sync_action.triggered.connect(self._on_sync_sheets)
         file_menu.addAction(sync_action)
-        
+
+        sync_all_action = QAction("Sync &All (Force)", self)
+        sync_all_action.triggered.connect(lambda: self._on_sync_sheets(force=True))
+        file_menu.addAction(sync_all_action)
+
         file_menu.addSeparator()
         
         exit_action = QAction("E&xit", self)
@@ -921,7 +935,14 @@ class KanbanMainWindow(QMainWindow):
         regime_action = QAction("&Run Market Regime Analysis", self)
         regime_action.triggered.connect(self._on_run_market_regime)
         service_menu.addAction(regime_action)
-        
+
+        # Reports menu
+        reports_menu = menubar.addMenu("&Reports")
+
+        weekly_report_action = QAction("📝 &Weekly Watchlist Report...", self)
+        weekly_report_action.triggered.connect(self._on_weekly_report)
+        reports_menu.addAction(weekly_report_action)
+
         # Help menu
         help_menu = menubar.addMenu("&Help")
         
@@ -3075,7 +3096,22 @@ class KanbanMainWindow(QMainWindow):
             
             if not spy_bars or not qqq_bars:
                 self.logger.error("No market data returned from Polygon")
-                dialog.show_error("Failed to fetch market data from Polygon API")
+                # Check if all symbols failed (likely rate limiting)
+                all_empty = not spy_bars and not qqq_bars and not dia_bars and not iwm_bars
+                if all_empty:
+                    error_msg = (
+                        "Failed to fetch market data from Polygon API.\n\n"
+                        "This is likely due to API rate limiting.\n"
+                        "The free Polygon tier allows only 5 requests per minute.\n\n"
+                        "Please wait 1-2 minutes before trying again."
+                    )
+                else:
+                    error_msg = (
+                        "Failed to fetch complete market data from Polygon API.\n\n"
+                        f"SPY: {len(spy_bars)} bars, QQQ: {len(qqq_bars)} bars\n"
+                        "Both SPY and QQQ data are required for regime analysis."
+                    )
+                dialog.show_error(error_msg)
                 dialog.exec()
                 return
             
@@ -3173,8 +3209,79 @@ class KanbanMainWindow(QMainWindow):
                 existing = main_session.query(MarketRegimeAlert).filter(
                     MarketRegimeAlert.date == today
                 ).first()
-                
+
                 if existing:
+                    # Prompt user before overwriting
+                    from PyQt6.QtWidgets import QMessageBox
+
+                    # Build info about existing record
+                    score_str = f"{existing.composite_score:.2f}" if existing.composite_score is not None else "N/A"
+                    existing_info = (
+                        f"A regime record already exists for today ({today}).\n\n"
+                        f"Existing Record:\n"
+                        f"  • Regime: {existing.regime.value if existing.regime else 'N/A'}\n"
+                        f"  • Score: {score_str}\n"
+                        f"  • SPY D-days: {existing.spy_d_count}\n"
+                        f"  • QQQ D-days: {existing.qqq_d_count}\n"
+                        f"  • Alert sent: {'Yes (morning run)' if existing.alert_sent else 'No'}\n"
+                        f"  • Created: {existing.created_at.strftime('%I:%M %p') if existing.created_at else 'Unknown'}\n\n"
+                        f"Do you want to overwrite this record?"
+                    )
+
+                    reply = QMessageBox.question(
+                        dialog,
+                        "Overwrite Existing Record?",
+                        existing_info,
+                        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                        QMessageBox.StandardButton.No  # Default to No
+                    )
+
+                    if reply != QMessageBox.StandardButton.Yes:
+                        self.logger.info("User declined to overwrite existing record")
+                        dialog.set_progress(100, "Showing results (not saved)")
+                        QApplication.processEvents()
+
+                        # Calculate index stats for display
+                        spy_stats = self._calculate_index_stats(spy_bars)
+                        qqq_stats = self._calculate_index_stats(qqq_bars)
+                        dia_stats = self._calculate_index_stats(dia_bars) if dia_bars else {}
+                        iwm_stats = self._calculate_index_stats(iwm_bars) if iwm_bars else {}
+
+                        # Build results dict (same format as normal flow)
+                        results = {
+                            'date': today.strftime("%A, %B %d, %Y"),
+                            'spy_count': combined.spy_count,
+                            'qqq_count': combined.qqq_count,
+                            'spy_delta': combined.spy_5day_delta,
+                            'qqq_delta': combined.qqq_5day_delta,
+                            'trend': combined.trend.value if hasattr(combined.trend, 'value') else str(combined.trend),
+                            'spy_dates': [d.isoformat() for d in combined.spy_dates],
+                            'qqq_dates': [d.isoformat() for d in combined.qqq_dates],
+                            'lookback_start': today - timedelta(days=25),
+                            'market_phase': ftd_status.phase.value,
+                            'in_rally_attempt': ftd_data.in_rally_attempt,
+                            'rally_day': ftd_data.rally_day,
+                            'has_confirmed_ftd': ftd_data.has_confirmed_ftd,
+                            'composite_score': score.composite_score,
+                            'regime': score.regime.value if hasattr(score.regime, 'value') else str(score.regime),
+                            'exposure': f"{min_exp}-{max_exp}%",
+                            'spy_stats': spy_stats,
+                            'qqq_stats': qqq_stats,
+                            'dia_stats': dia_stats,
+                            'iwm_stats': iwm_stats,
+                            'not_saved': True,  # Flag to indicate this wasn't saved
+                        }
+
+                        # Show results in dialog without saving
+                        dialog.show_results(results)
+                        main_session.close()
+                        temp_session.close()
+                        dialog.exec()
+                        return
+
+                    # User confirmed - proceed with update
+                    self.logger.info("User confirmed overwrite of existing record")
+
                     # Update existing record
                     existing.spy_d_count = combined.spy_count
                     existing.qqq_d_count = combined.qqq_count
@@ -3559,23 +3666,29 @@ class KanbanMainWindow(QMainWindow):
     
     def _on_position_edited_from_table(self, position_id: int, updated_data: dict):
         """Handle position edits from the table view."""
+        # Check if this is a delete notification - just refresh
+        if updated_data.get('deleted'):
+            self.logger.info(f"Position {position_id} was deleted from table view")
+            self._load_positions()
+            return
+
         session = self.db.get_new_session()
-        
+
         try:
             from canslim_monitor.data.models import Position
-            
+
             position = session.query(Position).filter_by(id=position_id).first()
             if position:
                 for key, value in updated_data.items():
                     if hasattr(position, key) and key != 'id':
                         setattr(position, key, value)
-                
+
                 session.commit()
                 self.logger.info(f"Updated position {position.symbol} (ID: {position_id}) from table view")
-                
+
                 # Refresh the kanban view to show changes
                 self._load_positions()
-                
+
         except Exception as e:
             session.rollback()
             self.logger.error(f"Failed to update position from table view: {e}")
@@ -3583,10 +3696,107 @@ class KanbanMainWindow(QMainWindow):
         finally:
             session.close()
     
-    def _on_sync_sheets(self):
-        """Sync to Google Sheets."""
-        QMessageBox.information(self, "Sync", "Google Sheets sync (coming soon)")
-    
+    def _on_sync_sheets(self, force: bool = False):
+        """Trigger Google Sheets sync.
+
+        Args:
+            force: If True, sync all active positions regardless of needs_sheet_sync flag
+        """
+        from canslim_monitor.integrations.sheets_sync import SheetsSync
+
+        # Load config
+        sheets_config = self.config.get('google_sheets', {})
+
+        # Validate config
+        if not sheets_config.get('enabled'):
+            QMessageBox.warning(self, "Sync Disabled",
+                "Google Sheets sync is disabled. Enable in config.yaml.")
+            return
+
+        if not sheets_config.get('spreadsheet_id') or not sheets_config.get('credentials_path'):
+            QMessageBox.warning(self, "Config Missing",
+                "Please configure spreadsheet_id and credentials_path in user_config.yaml")
+            return
+
+        # Show status
+        sync_type = "Force syncing all" if force else "Syncing"
+        self.statusBar().showMessage(f"{sync_type} to Google Sheets...")
+        QApplication.processEvents()
+
+        try:
+            # Create sync service
+            sync = SheetsSync(self.config, self.db)
+
+            # Run sync
+            result = sync.sync_all(force=force)
+
+            if result.success:
+                force_text = " (forced)" if force else ""
+                msg = (f"Sync complete{force_text}:\n"
+                       f"• {result.updated} updated\n"
+                       f"• {result.inserted} inserted\n"
+                       f"• {result.deleted} removed (closed positions)")
+                self.statusBar().showMessage(
+                    f"Sync: {result.updated} updated, {result.inserted} new, {result.deleted} removed",
+                    5000
+                )
+                QMessageBox.information(self, "Sync Complete", msg)
+            else:
+                errors = "\n".join(result.error_messages[:5])
+                QMessageBox.warning(self, "Sync Failed", f"Sync failed:\n{errors}")
+                self.statusBar().showMessage("Sync failed", 5000)
+
+        except Exception as e:
+            QMessageBox.critical(self, "Sync Error", f"Error: {str(e)}")
+            self.statusBar().showMessage("Sync error", 5000)
+            self.logger.error(f"Sync error: {e}", exc_info=True)
+
+    def _auto_sync_check(self):
+        """Automatically sync positions that need syncing (background timer)."""
+        from canslim_monitor.integrations.sheets_sync import SheetsSync
+        from canslim_monitor.data.repositories import RepositoryManager
+
+        # Check if any positions need syncing
+        try:
+            session = self.db.get_new_session()
+            repos = RepositoryManager(session)
+            positions_needing_sync = repos.positions.get_needing_sync()
+            session.close()
+
+            if not positions_needing_sync:
+                return  # Nothing to sync
+
+            # Run sync silently in background
+            self.logger.info(f"Auto-sync: {len(positions_needing_sync)} positions need syncing")
+
+            sync = SheetsSync(self.config, self.db)
+            result = sync.sync_all()
+
+            if result.success:
+                self.logger.info(f"Auto-sync complete: {result.updated} updated, "
+                               f"{result.inserted} inserted, {result.deleted} deleted")
+                # Brief status message (don't interrupt user)
+                self.statusBar().showMessage(
+                    f"Auto-synced: {result.updated + result.inserted} positions, {result.deleted} removed",
+                    3000
+                )
+            else:
+                self.logger.error(f"Auto-sync failed: {result.error_messages}")
+
+        except Exception as e:
+            self.logger.error(f"Auto-sync error: {e}", exc_info=True)
+
+    def _on_weekly_report(self):
+        """Generate weekly watchlist report."""
+        from canslim_monitor.gui.dialogs.report_generator_dialog import ReportGeneratorDialog
+
+        try:
+            dialog = ReportGeneratorDialog(self.config, self.db, parent=self)
+            dialog.exec()
+        except Exception as e:
+            QMessageBox.critical(self, "Report Error", f"Error opening report dialog: {str(e)}")
+            self.logger.error(f"Report dialog error: {e}", exc_info=True)
+
     def _on_about(self):
         """Show about dialog."""
         QMessageBox.about(

@@ -108,33 +108,40 @@ class PositionMonitor:
         positions: List[Position],
         price_data: Dict[str, Dict[str, Any]],
         technical_data: Dict[str, Dict[str, Any]] = None,
+        market_regime: str = "",
+        spy_price: float = 0.0,
     ) -> MonitorCycleResult:
         """
         Run a monitoring cycle across all positions.
-        
+
         Args:
             positions: List of Position ORM models (state >= 1)
             price_data: Dict of symbol -> {price, volume_ratio, ...}
             technical_data: Dict of symbol -> {ma_21, ma_50, ma_200, ...}
-            
+            market_regime: Current market regime (BULLISH/NEUTRAL/BEARISH/CORRECTION)
+            spy_price: Current SPY price
+
         Returns:
             MonitorCycleResult with all alerts and stats
         """
         start_time = time.time()
         result = MonitorCycleResult()
         technical_data = technical_data or {}
-        
+
         for position in positions:
             try:
-                alerts = self._check_position(position, price_data, technical_data)
+                alerts = self._check_position(
+                    position, price_data, technical_data,
+                    market_regime=market_regime, spy_price=spy_price
+                )
                 result.alerts.extend(alerts)
                 result.positions_checked += 1
-                
+
             except Exception as e:
                 error_msg = f"Error checking {position.symbol}: {e}"
                 self.logger.error(error_msg, exc_info=True)
                 result.errors.append(error_msg)
-        
+
         result.alerts_generated = len(result.alerts)
         result.cycle_time_ms = (time.time() - start_time) * 1000
         
@@ -154,26 +161,31 @@ class PositionMonitor:
         position: Position,
         price_data: Dict[str, Dict[str, Any]],
         technical_data: Dict[str, Dict[str, Any]],
+        market_regime: str = "",
+        spy_price: float = 0.0,
     ) -> List[AlertData]:
         """Check a single position with all checkers."""
         symbol = position.symbol
-        
+
         # Get price data
         price_info = price_data.get(symbol, {})
         current_price = price_info.get('price')
-        
+
         if not current_price:
             self.logger.debug(f"No price data for {symbol}, skipping")
             return []
-        
+
         # Merge technical data
         tech_info = technical_data.get(symbol, {})
         tech_info['volume_ratio'] = price_info.get('volume_ratio', 1.0)
         tech_info['max_price'] = price_info.get('max_price', current_price)
         tech_info['max_gain_pct'] = price_info.get('max_gain_pct', 0)
-        
-        # Build context
-        context = PositionContext.from_position(position, current_price, tech_info)
+
+        # Build context with market regime
+        context = PositionContext.from_position(
+            position, current_price, tech_info,
+            market_regime=market_regime, spy_price=spy_price
+        )
         
         # Run all checkers
         alerts = []

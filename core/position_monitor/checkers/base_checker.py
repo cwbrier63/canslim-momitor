@@ -77,11 +77,15 @@ class PositionContext:
     # Health
     health_score: int = 100
     health_rating: str = "HEALTHY"
-    
+
     # CANSLIM scoring
     canslim_grade: str = ""
     canslim_score: int = 0
-    
+
+    # Market context
+    market_regime: str = ""
+    spy_price: float = 0.0
+
     # Stop levels
     hard_stop: float = 0.0
     trailing_stop: Optional[float] = None
@@ -98,14 +102,18 @@ class PositionContext:
         position: Position,
         current_price: float,
         technical_data: Dict[str, Any] = None,
+        market_regime: str = "",
+        spy_price: float = 0.0,
     ) -> 'PositionContext':
         """
         Build context from Position model and real-time data.
-        
+
         Args:
             position: Position ORM model
             current_price: Real-time price
             technical_data: Dict with ma_21, ma_50, ma_200, volume_ratio
+            market_regime: Current market regime (BULLISH/NEUTRAL/BEARISH/CORRECTION)
+            spy_price: Current SPY price
         """
         technical_data = technical_data or {}
         
@@ -172,6 +180,8 @@ class PositionContext:
             health_rating=position.health_rating or "HEALTHY",
             canslim_grade=position.entry_grade or "",
             canslim_score=position.entry_score or 0,
+            market_regime=market_regime,
+            spy_price=spy_price,
             hard_stop=position.stop_price or 0,
             trailing_stop=technical_data.get('trailing_stop'),
         )
@@ -447,11 +457,14 @@ class BaseChecker(ABC):
             pnl_pct=context.pnl_pct,
             ma_50=context.ma_50 or 0,
             ma_21=context.ma_21 or 0,
+            ma_200=context.ma_200 or 0,
             volume_ratio=context.volume_ratio,
             health_score=context.health_score,
             health_rating=context.health_rating,
             grade=context.canslim_grade,
             score=context.canslim_score,
+            market_regime=context.market_regime,
+            spy_price=context.spy_price,
             state_at_alert=context.state,
             days_in_position=context.days_in_position,
         )

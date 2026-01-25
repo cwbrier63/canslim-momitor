@@ -894,7 +894,11 @@ class PositionTableView(QDialog):
         
         # Double-click to edit
         self.table_view.doubleClicked.connect(self._on_double_click)
-        
+
+        # Right-click context menu
+        self.table_view.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.table_view.customContextMenuRequested.connect(self._on_table_context_menu)
+
         # Set column widths
         header = self.table_view.horizontalHeader()
         column_widths = [
@@ -1161,8 +1165,327 @@ class PositionTableView(QDialog):
                     writer.writerow(row_data)
             
             QMessageBox.information(
-                self, "Export Complete", 
+                self, "Export Complete",
                 f"Exported {self.proxy_model.rowCount()} positions to:\n{filename}"
             )
         except Exception as e:
             QMessageBox.critical(self, "Export Error", f"Failed to export: {e}")
+
+    def _on_table_context_menu(self, pos: QPoint):
+        """Handle right-click context menu on table rows."""
+        # Get the index at the click position
+        index = self.table_view.indexAt(pos)
+        if not index.isValid():
+            return
+
+        # Get the source row and position data
+        source_index = self.proxy_model.mapToSource(index)
+        row = source_index.row()
+        position_data = self.table_model.get_position_data(row)
+
+        if not position_data:
+            return
+
+        position_id = position_data.get('id')
+        state = position_data.get('state', 0)
+        symbol = position_data.get('symbol', 'Unknown')
+
+        menu = QMenu(self)
+
+        # Edit action
+        edit_action = menu.addAction("✏️ Edit Position")
+        edit_action.triggered.connect(lambda: self._open_edit_dialog(position_data))
+
+        # Score details action
+        score_action = menu.addAction("📊 View Score Details")
+        score_action.triggered.connect(lambda: self._show_score_details(position_id))
+
+        # View alerts action
+        alerts_action = menu.addAction("🔔 View Alerts")
+        alerts_action.triggered.connect(lambda: self._show_position_alerts(symbol, position_id))
+
+        menu.addSeparator()
+
+        # State transition actions
+        from canslim_monitor.gui.state_config import get_valid_transitions
+        valid_transitions = get_valid_transitions(state)
+
+        if valid_transitions:
+            move_menu = menu.addMenu("📦 Move to...")
+            for transition in valid_transitions:
+                to_state = transition.to_state
+                to_name = STATES[to_state].display_name
+                action = move_menu.addAction(f"{to_name}")
+                action.triggered.connect(
+                    lambda checked, ts=to_state, pid=position_id, cs=state: self._trigger_transition(pid, cs, ts)
+                )
+
+        menu.addSeparator()
+
+        # Quick actions based on state
+        if state >= 1:  # In position
+            stop_action = menu.addAction("🛑 Stop Out")
+            stop_action.triggered.connect(
+                lambda: self._trigger_transition(position_id, state, -2)
+            )
+
+            close_action = menu.addAction("✅ Close Position")
+            close_action.triggered.connect(
+                lambda: self._trigger_transition(position_id, state, -1)
+            )
+
+        menu.addSeparator()
+
+        # Delete action
+        delete_action = menu.addAction("🗑️ Delete")
+        delete_action.triggered.connect(lambda: self._delete_position(position_id, symbol))
+
+        # Show menu at cursor position
+        menu.exec(self.table_view.viewport().mapToGlobal(pos))
+
+    def _show_score_details(self, position_id: int):
+        """Show detailed score breakdown for a position."""
+        import json
+        from canslim_monitor.utils.scoring import CANSLIMScorer
+        from canslim_monitor.data.models import Position
+        from PyQt6.QtWidgets import QTextEdit
+
+        try:
+            position = self.db_session.query(Position).filter_by(id=position_id).first()
+
+            if not position:
+                QMessageBox.warning(self, "Error", "Position not found")
+                return
+
+            # Get current market regime (default to BULLISH)
+            market_regime = 'BULLISH'
+            try:
+                from canslim_monitor.data.models import MarketRegime
+                market_config = self.db_session.query(MarketRegime).order_by(MarketRegime.id.desc()).first()
+                if market_config:
+                    market_regime = market_config.regime
+            except:
+                pass
+
+            scorer = CANSLIMScorer()
+
+            # Try to load stored details first
+            details = None
+            if position.entry_score_details:
+                try:
+                    details = json.loads(position.entry_score_details)
+                    if 'total_score' not in details or 'grade' not in details:
+                        details = None
+                except (json.JSONDecodeError, TypeError):
+                    details = None
+
+            # If no stored details, calculate static score
+            if details is None:
+                position_data = {
+                    'pattern': position.pattern,
+                    'rs_rating': position.rs_rating,
+                    'eps_rating': position.eps_rating,
+                    'ad_rating': position.ad_rating,
+                    'base_stage': position.base_stage,
+                    'base_depth': position.base_depth,
+                    'base_length': position.base_length,
+                    'ud_vol_ratio': position.ud_vol_ratio,
+                    'fund_count': position.fund_count,
+                    'group_rank': position.group_rank,
+                    'comp_rating': position.comp_rating,
+                    'prior_uptrend': position.prior_uptrend,
+                }
+                score, grade, details = scorer.calculate_score(position_data, market_regime)
+            else:
+                score = details.get('total_score', position.entry_score or 0)
+                grade = details.get('grade', position.entry_grade or 'F')
+
+            # Format details text
+            details_text = scorer.format_details_text(details, symbol=position.symbol, pivot=position.pivot)
+
+            # Show in a dialog
+            dialog = QDialog(self)
+            dialog.setWindowTitle(f"Score Details: {position.symbol}")
+            dialog.setMinimumSize(720, 750)
+
+            layout = QVBoxLayout(dialog)
+
+            # Header with symbol and grade
+            header = QLabel(f"<h2>{position.symbol} - Grade: {grade} (Score: {score})</h2>")
+            header.setStyleSheet("color: #E0E0E0;")
+            layout.addWidget(header)
+
+            # Score details in monospace text
+            text_edit = QTextEdit()
+            text_edit.setReadOnly(True)
+            text_edit.setFontFamily("Consolas, Monaco, monospace")
+            text_edit.setPlainText(details_text)
+            text_edit.setStyleSheet("""
+                QTextEdit {
+                    background-color: #1E1E1E;
+                    color: #D4D4D4;
+                    font-size: 13px;
+                    padding: 10px;
+                    line-height: 1.4;
+                }
+            """)
+            layout.addWidget(text_edit)
+
+            # Buttons
+            btn_layout = QHBoxLayout()
+
+            # Recalculate button - call parent's recalculate method if available
+            recalc_btn = QPushButton("🔄 Recalculate")
+            recalc_btn.setToolTip("Fetch latest data and recalculate score with execution feasibility")
+
+            def do_recalculate():
+                # Call parent's recalculate method if available (kanban_window)
+                if self.parent() and hasattr(self.parent(), '_recalculate_score'):
+                    dialog.accept()  # Close this dialog
+                    self.parent()._recalculate_score(position_id)
+                else:
+                    QMessageBox.information(
+                        dialog, "Info",
+                        "Recalculate is only available from the main window.\n"
+                        "Please use the kanban view for full recalculation."
+                    )
+
+            recalc_btn.clicked.connect(do_recalculate)
+            btn_layout.addWidget(recalc_btn)
+
+            btn_layout.addStretch()
+
+            close_btn = QPushButton("Close")
+            close_btn.clicked.connect(dialog.accept)
+            btn_layout.addWidget(close_btn)
+
+            layout.addLayout(btn_layout)
+
+            dialog.exec()
+
+        except Exception as e:
+            QMessageBox.warning(self, "Error", f"Failed to show score details: {e}")
+
+    def _show_position_alerts(self, symbol: str, position_id: int):
+        """Show alerts dialog for position using the AlertService."""
+        try:
+            from canslim_monitor.gui.alerts import PositionAlertDialog
+            from canslim_monitor.services.alert_service import AlertService
+            import logging
+
+            # Get db_session_factory from parent (kanban_window)
+            db_session_factory = None
+            if self.parent() and hasattr(self.parent(), 'db'):
+                db_session_factory = self.parent().db.get_new_session
+
+            # Create alert service
+            alert_service = AlertService(
+                db_session_factory=db_session_factory,
+                logger=logging.getLogger('canslim.alerts')
+            )
+
+            # Fetch alerts for this symbol using the proper service
+            alerts = alert_service.get_recent_alerts(
+                symbol=symbol,
+                hours=24 * 90,  # 90 days
+                limit=500
+            )
+
+            if not alerts:
+                QMessageBox.information(self, "No Alerts", f"No alerts found for {symbol}")
+                return
+
+            # Show dialog with alert service for acknowledgment support
+            dialog = PositionAlertDialog(
+                symbol=symbol,
+                alerts=alerts,
+                parent=self,
+                alert_service=alert_service,
+                db_session_factory=db_session_factory
+            )
+            dialog.alert_acknowledged.connect(lambda _: self._load_data())
+            dialog.show()  # Modeless like kanban_window
+
+        except Exception as e:
+            QMessageBox.warning(self, "Error", f"Failed to show alerts: {e}")
+
+    def _trigger_transition(self, position_id: int, from_state: int, to_state: int):
+        """Trigger a state transition for the position."""
+        try:
+            from canslim_monitor.data.models import Position
+
+            position = self.db_session.query(Position).filter_by(id=position_id).first()
+            if not position:
+                QMessageBox.warning(self, "Error", "Position not found")
+                return
+
+            # Check if transition requires a dialog
+            from canslim_monitor.gui.state_config import get_transition
+            transition = get_transition(from_state, to_state)
+
+            if transition and transition.requires_dialog:
+                # Import appropriate dialog
+                if to_state == 1:  # Entry
+                    from canslim_monitor.gui.transition_dialogs import EntryDialog
+                    dialog = EntryDialog(position, self)
+                elif to_state == -1:  # Closed
+                    from canslim_monitor.gui.transition_dialogs import ClosePositionDialog
+                    dialog = ClosePositionDialog(position, self)
+                elif to_state == -2:  # Stopped Out
+                    from canslim_monitor.gui.transition_dialogs import StopOutDialog
+                    dialog = StopOutDialog(position, self)
+                else:
+                    dialog = None
+
+                if dialog:
+                    if dialog.exec() == QDialog.DialogCode.Accepted:
+                        result = dialog.get_result()
+                        # Apply the transition result
+                        for key, value in result.items():
+                            if hasattr(position, key):
+                                setattr(position, key, value)
+                        position.state = to_state
+                        self.db_session.commit()
+                        self._load_data()
+                    return
+
+            # Simple state change (no dialog required)
+            position.state = to_state
+            self.db_session.commit()
+            self._load_data()
+
+            # Emit signal so parent window updates
+            self.position_edited.emit(position_id, {'state': to_state})
+
+        except Exception as e:
+            self.db_session.rollback()
+            QMessageBox.warning(self, "Error", f"Failed to change state: {e}")
+
+    def _delete_position(self, position_id: int, symbol: str):
+        """Delete a position after confirmation."""
+        reply = QMessageBox.question(
+            self,
+            "Confirm Delete",
+            f"Are you sure you want to delete position '{symbol}'?\n\nThis action cannot be undone.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No
+        )
+
+        if reply == QMessageBox.StandardButton.Yes:
+            try:
+                from canslim_monitor.data.models import Position
+
+                position = self.db_session.query(Position).filter_by(id=position_id).first()
+                if position:
+                    self.db_session.delete(position)
+                    self.db_session.commit()
+                    self._load_data()
+                    QMessageBox.information(self, "Deleted", f"Position '{symbol}' has been deleted.")
+
+                    # Emit signal so parent window updates
+                    self.position_edited.emit(position_id, {'deleted': True})
+                else:
+                    QMessageBox.warning(self, "Error", "Position not found")
+            except Exception as e:
+                self.db_session.rollback()
+                QMessageBox.warning(self, "Error", f"Failed to delete position: {e}")

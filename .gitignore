@@ -65,9 +65,30 @@ config/*_secrets.yaml
 config/*_local.yaml
 *_secrets.yaml
 *_local.yaml
+user_config.yaml
+
+# API Credentials (SENSITIVE - never commit!)
+google_credentials.json
+*_credentials.json
+*.json.enc
 
 # Keep the main config.yaml template
 !config/config.yaml.template
+
+# -----------------------------------------------------------------------------
+# Claude Code / AI Tools
+# -----------------------------------------------------------------------------
+.claude/
+
+# -----------------------------------------------------------------------------
+# Windows artifacts
+# -----------------------------------------------------------------------------
+nul
+
+# -----------------------------------------------------------------------------
+# Generated reports
+# -----------------------------------------------------------------------------
+reports/
 
 # -----------------------------------------------------------------------------
 # IDE / Editor

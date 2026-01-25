@@ -135,10 +135,13 @@ class PositionRepository:
         return query.order_by(Position.symbol).all()
     
     def get_needing_sync(self) -> List[Position]:
-        """Get positions that need to be synced to Google Sheets."""
+        """Get positions that need to be synced to Google Sheets.
+
+        Returns ALL positions with needs_sheet_sync=True, including closed ones.
+        Closed positions (state < 0) will be deleted from the sheet.
+        """
         return self.session.query(Position).filter(
-            Position.needs_sheet_sync == True,
-            Position.state >= 0
+            Position.needs_sheet_sync == True
         ).all()
     
     def get_by_sheet_row_id(self, sheet_row_id: str) -> Optional[Position]:

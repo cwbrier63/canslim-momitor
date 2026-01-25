@@ -459,6 +459,7 @@ class AlertService:
                     pnl_pct_at_alert=alert_data.context.pnl_pct,
                     ma50=alert_data.context.ma_50,
                     ma21=alert_data.context.ma_21,
+                    ma200=alert_data.context.ma_200,
                     volume_ratio=alert_data.context.volume_ratio,
                     health_score=alert_data.context.health_score,
                     health_rating=alert_data.context.health_rating,

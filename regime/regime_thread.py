@@ -11,7 +11,7 @@ Integrates the comprehensive regime analysis system with the service framework:
 - Discord morning brief
 
 Schedule:
-- Morning analysis at 8:00 AM ET
+- Morning analysis at 8:30 AM ET (7:30 AM CT)
 - Optional intraday updates during market hours
 
 This wraps the ported MarketRegime-MonitorSystem components for service use.
@@ -58,7 +58,7 @@ class RegimeThread(BaseThread):
     - Database persistence for historical analysis
     """
     
-    DEFAULT_ALERT_TIME = "08:00"  # 8 AM ET
+    DEFAULT_ALERT_TIME = "08:30"  # 8:30 AM ET (7:30 AM CT)
     
     def __init__(
         self,

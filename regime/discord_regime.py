@@ -290,6 +290,9 @@ Direction:   {score.regime_trend.upper()}
             dist
         )
         
+        # FTD/Market Phase section
+        ftd_section = self._build_ftd_section(ftd, score.market_phase) if ftd else ""
+
         message = f"""{mention}__**🌅 MORNING MARKET REGIME ALERT**__
 *{date_str}*
 
@@ -320,6 +323,8 @@ Direction:   {score.regime_trend.upper()}
 ```
 {es_emoji} ES  {nq_emoji} NQ  {ym_emoji} YM
 
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+{ftd_section}
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 {entry_risk_section}
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

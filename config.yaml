@@ -54,7 +54,9 @@ google_sheets:
   enabled: true
   spreadsheet_id: ""  # Fill in your spreadsheet ID
   sheet_name: "Positions"
+  credentials_path: ""  # Path to service account JSON credentials
   sync_interval: 300  # seconds
+  auto_sync: false  # Enable automatic periodic sync
 
 # Polygon.io / Massive API
 polygon:
@@ -125,3 +127,25 @@ position_management:
   pyramid_1_pct: 2.5            # First pyramid point (above entry)
   pyramid_2_pct: 5.0            # Second pyramid point (above entry)
   max_extension_pct: 10.0       # Maximum buy zone extension
+
+# Market Regime Configuration
+market_regime:
+  enabled: true
+  alert_time: "08:30"             # 8:30 AM ET (7:30 AM CT)
+  use_indices: false              # true = SPX/COMP, false = SPY/QQQ
+
+# Distribution Day Tracking
+distribution_days:
+  decline_threshold: -0.2         # Minimum decline % to count as D-day
+  lookback_days: 25               # Rolling window for D-days
+  rally_expiration_pct: 5.0       # Rally % needed to expire a D-day
+  enable_stalling: false          # Set true to detect stall days
+
+# Reports Configuration
+reports:
+  weekly_watchlist:
+    output_dir: "C:/Trading/canslim_monitor/reports/output"
+    filename_template: "Weekly_Watchlist_{date}.docx"
+    include_closed: false         # Include recently closed positions
+    min_rs_rating: 0              # Minimum RS rating to include (0 = all)
+    top_picks_count: 5            # Number of top picks to highlight

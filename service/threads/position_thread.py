@@ -97,7 +97,10 @@ class PositionThread(BaseThread):
         )
         
         # Initialize TechnicalDataService for MAs and volume
-        polygon_key = config.get('polygon', {}).get('api_key', '')
+        # Try market_data config first (new format), fall back to polygon config (legacy)
+        market_data_config = config.get('market_data', {})
+        polygon_config = config.get('polygon', {})
+        polygon_key = market_data_config.get('api_key', '') or polygon_config.get('api_key', '')
         self.technical_service = TechnicalDataService(
             polygon_api_key=polygon_key,
             cache_duration_hours=4,  # Refresh MAs every 4 hours
@@ -136,14 +139,20 @@ class PositionThread(BaseThread):
             
             # Get technical data
             technical_data = self._get_technical_data(symbols, price_data)
-            
+
+            # Get market regime and SPY price for context
+            market_regime, spy_price = self._get_market_context()
+
             # Merge max prices and max gains into price_data for position monitor
             for symbol in price_data:
                 price_data[symbol]['max_price'] = self._max_prices.get(symbol, price_data[symbol]['price'])
                 price_data[symbol]['max_gain_pct'] = self._max_gains.get(symbol, 0)
-            
-            # Run monitoring cycle with correct signature
-            result = self.position_monitor.run_cycle(positions, price_data, technical_data)
+
+            # Run monitoring cycle with market context
+            result = self.position_monitor.run_cycle(
+                positions, price_data, technical_data,
+                market_regime=market_regime, spy_price=spy_price
+            )
             
             # Route alerts through AlertService
             self._route_alerts(result.alerts)
@@ -292,6 +301,49 @@ class PositionThread(BaseThread):
             use_time_adjusted=True
         )
     
+    def _get_market_context(self) -> tuple:
+        """
+        Get current market regime and SPY price.
+
+        Returns:
+            Tuple of (market_regime: str, spy_price: float)
+        """
+        market_regime = ""
+        spy_price = 0.0
+
+        # Try to get market regime from database
+        if self.db_session_factory:
+            try:
+                session = self.db_session_factory()
+                try:
+                    from canslim_monitor.regime.models_regime import MarketRegimeAlert
+                    from sqlalchemy import desc
+
+                    # Get most recent regime alert
+                    latest = (
+                        session.query(MarketRegimeAlert)
+                        .order_by(desc(MarketRegimeAlert.date))
+                        .first()
+                    )
+                    if latest and latest.regime:
+                        market_regime = latest.regime.value
+                finally:
+                    session.close()
+            except Exception as e:
+                self.logger.debug(f"Could not fetch market regime: {e}")
+
+        # Try to get SPY price from IBKR
+        if self.ibkr_client:
+            try:
+                if hasattr(self.ibkr_client, 'get_quote'):
+                    spy_quote = self.ibkr_client.get_quote('SPY')
+                    if spy_quote and spy_quote.get('last', 0) > 0:
+                        spy_price = spy_quote['last']
+            except Exception as e:
+                self.logger.debug(f"Could not fetch SPY price: {e}")
+
+        return market_regime, spy_price
+
     def _get_technical_data(
         self,
         symbols: List[str],

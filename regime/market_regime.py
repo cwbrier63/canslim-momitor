@@ -152,8 +152,8 @@ class RegimeScore:
 
 class MarketRegimeCalculator:
     """
-    Calculates weighted market regime score.
-    
+    Calculates weighted market regime score aligned with IBD methodology.
+
     Score Components (default weights):
     - SPY Distribution Count: 25%
     - QQQ Distribution Count: 25%
@@ -161,11 +161,11 @@ class MarketRegimeCalculator:
     - Overnight ES Futures: 10%
     - Overnight NQ Futures: 10%
     - Overnight YM Futures: 10%
-    
-    Regime Classification:
-    - BULLISH: Score >= 0.5
-    - BEARISH: Score <= -0.25
-    - NEUTRAL: Between -0.25 and 0.5
+
+    Regime Classification (aligned with IBD exposure levels):
+    - BULLISH: Score >= 0.5 (0-3 D-days, 80-100% exposure)
+    - NEUTRAL: Score between -0.65 and 0.5 (4-10 D-days, 40-80% exposure)
+    - BEARISH: Score <= -0.65 (11+ D-days, 0-40% exposure)
     """
     
     # Default configuration
@@ -179,29 +179,29 @@ class MarketRegimeCalculator:
     }
     
     # Updated D-day scoring to align with IBD exposure guidance
-    # IBD: 4 SPX + 7 NASDAQ = 60-80% exposure (NEUTRAL, not BEARISH)
+    # IBD: 4-7 distribution days = 60-80% exposure (NEUTRAL, not BEARISH)
+    # IBD: 8-10 distribution days = 40-60% exposure (CAUTION, still not BEARISH)
     DEFAULT_D_DAY_SCORES = {
         # Granular scoring aligned with IBD exposure levels
-        # 0-2 D-days = "Confirmed uptrend" = 80-100% exposure
-        # 3-4 D-days = Still healthy = 70-90% exposure
-        # 5-6 D-days = "Under pressure" = 60-80% exposure
-        # 7-8 D-days = Elevated caution = 40-60% exposure
-        # 9+ D-days = Heavy distribution = 20-40% exposure
-        'thresholds': [2, 4, 6, 8],     # Breakpoints
-        'scores': [2, 1, 0, -1, -2],    # Scores for each range
+        # 0-3 D-days = "Confirmed uptrend" = 80-100% exposure → score +2
+        # 4-7 D-days = "Uptrend under pressure" = 60-80% exposure → score 0
+        # 8-10 D-days = "Pressure increasing" = 40-60% exposure → score -1
+        # 11+ D-days = "Correction" = 0-40% exposure → score -2
+        'thresholds': [3, 7, 10],       # Breakpoints (more lenient)
+        'scores': [2, 0, -1, -2],       # Scores for each range
         # Legacy fields for backward compatibility
         'low': 2,
         'medium': 0,
         'high': -2,
-        'low_max': 2,
-        'medium_max': 4
+        'low_max': 3,
+        'medium_max': 7
     }
     
-    # Updated regime thresholds - wider NEUTRAL band
+    # Updated regime thresholds - align with IBD methodology
     DEFAULT_THRESHOLDS = {
-        'bullish_min': 0.60,    # Need strong positive signal for BULLISH
-        'bearish_max': -0.40    # Need significant weakness for BEARISH
-        # NEUTRAL: Between -0.40 and 0.60 (wider band)
+        'bullish_min': 0.50,    # Strong positive signal for BULLISH (0-3 D-days)
+        'bearish_max': -0.65    # Significant weakness for BEARISH (11+ D-days only)
+        # NEUTRAL: Between -0.65 and 0.50 (wide band for 4-10 D-days)
     }
     
     DEFAULT_OVERNIGHT = {
@@ -264,14 +264,13 @@ class MarketRegimeCalculator:
     def calculate_d_day_score(self, count: int) -> float:
         """
         Score distribution day count using IBD-aligned thresholds.
-        
-        IBD Exposure Alignment:
-        0-2 D-days: +2 (80-100% exposure - "Confirmed uptrend")
-        3-4 D-days: +1 (70-90% exposure - "Healthy uptrend")
-        5-6 D-days:  0 (60-80% exposure - "Uptrend under pressure")
-        7-8 D-days: -1 (40-60% exposure - "Elevated caution")
-        9+  D-days: -2 (20-40% exposure - "Heavy distribution")
-        
+
+        IBD Exposure Alignment (updated to match MarketSurge guidance):
+        0-3 D-days:  +2 (80-100% exposure - "Confirmed uptrend")
+        4-7 D-days:   0 (60-80% exposure - "Uptrend under pressure")
+        8-10 D-days: -1 (40-60% exposure - "Pressure increasing")
+        11+ D-days:  -2 (0-40% exposure - "Correction")
+
         Returns:
             Score from -2 to +2
         """
@@ -454,13 +453,15 @@ class MarketRegimeCalculator:
                 "→ Market environment supports growth stocks"
             ),
             RegimeType.NEUTRAL: (
-                "→ Reduce position sizes (50-75%)\n"
-                "→ Selective entries only - A+ setups\n"
-                "→ Tighten stops on existing positions"
+                "→ Moderate position sizes (40-80%)\n"
+                "→ Selective entries only - A+/A setups\n"
+                "→ Tighten stops on existing positions\n"
+                "→ Monitor distribution day trends closely"
             ),
             RegimeType.BEARISH: (
-                "→ Defensive posture - raise cash (20-40%)\n"
-                "→ Avoid new long positions\n"
+                "→ Defensive posture - raise cash (0-40%)\n"
+                "→ Avoid new long positions entirely\n"
+                "→ Take profits on remaining positions\n"
                 "→ Wait for follow-through day signal"
             )
         }
