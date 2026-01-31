@@ -65,6 +65,13 @@ class Position(Base):
     tp2_sold = Column(Integer, default=0)
     tp2_price = Column(Float)
     tp2_date = Column(Date)
+
+    # Full Position Close (for state -1/-2)
+    close_price = Column(Float)
+    close_date = Column(Date)
+    close_reason = Column(String(30))  # STOP_HIT, TP_HIT, MANUAL, 50MA_BREAKDOWN, etc.
+    realized_pnl = Column(Float)       # Dollar P&L
+    realized_pnl_pct = Column(Float)   # Percentage P&L
     
     # Pyramid Flags
     py1_done = Column(Boolean, default=False)

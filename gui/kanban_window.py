@@ -31,28 +31,121 @@ from canslim_monitor.gui.ibd_exposure_dialog import IBDExposureDialog
 from canslim_monitor.gui.position_table_view import PositionTableView
 
 
+# Module-level cache to prevent Polygon API rate limiting
+# Polygon free tier: 5 calls/minute - cache for 60 seconds minimum
+_polygon_price_cache: Dict[str, Dict] = {}
+_polygon_cache_time: float = 0
+_POLYGON_CACHE_TTL = 60  # seconds
+
+
 class PriceUpdateWorker(QObject):
     """
     Worker that fetches prices from IBKR in a background thread.
+    Falls back to Polygon for index ETFs if IBKR unavailable.
+    Uses module-level cache to respect Polygon rate limits (5 calls/min).
     """
     finished = pyqtSignal(dict)  # Emits {symbol: price_data}
     error = pyqtSignal(str)
-    
-    def __init__(self, ibkr_client, symbols: List[str]):
+
+    INDEX_ETFS = ['SPY', 'QQQ', 'DIA', 'IWM']
+
+    def __init__(self, ibkr_client, symbols: List[str], polygon_api_key: str = None):
         super().__init__()
         self.ibkr_client = ibkr_client
         self.symbols = symbols
-    
+        self.polygon_api_key = polygon_api_key
+
     def run(self):
-        """Fetch prices from IBKR."""
+        """Fetch prices from IBKR with Polygon fallback for indices."""
+        import logging
+        logger = logging.getLogger('canslim.gui')
+
         try:
-            if self.ibkr_client and self.symbols:
-                prices = self.ibkr_client.get_quotes(self.symbols)
-                self.finished.emit(prices)
-            else:
-                self.finished.emit({})
+            prices = {}
+
+            # Try IBKR first
+            if self.ibkr_client:
+                connected = self.ibkr_client.is_connected()
+                logger.debug(f"IBKR connected: {connected}, fetching {len(self.symbols)} symbols")
+                if connected:
+                    prices = self.ibkr_client.get_quotes(self.symbols) or {}
+                    logger.debug(f"IBKR returned prices for: {list(prices.keys())}")
+
+            # Check if we're missing index ETFs - use Polygon fallback
+            missing_indices = [s for s in self.INDEX_ETFS if s not in prices or not prices.get(s, {}).get('last')]
+            if missing_indices:
+                logger.debug(f"Missing index prices, using Polygon fallback for: {missing_indices}")
+                polygon_prices = self._fetch_from_polygon(missing_indices)
+                if polygon_prices:
+                    logger.debug(f"Polygon returned prices for: {list(polygon_prices.keys())}")
+                prices.update(polygon_prices)
+
+            self.finished.emit(prices)
         except Exception as e:
+            logger.error(f"Price fetch error: {e}")
             self.error.emit(str(e))
+
+    def _fetch_from_polygon(self, symbols: List[str]) -> Dict:
+        """Fetch current prices from Polygon as fallback with caching.
+
+        Uses module-level cache to prevent rate limiting (5 calls/min on free tier).
+        Cache TTL is 60 seconds to stay well under the rate limit.
+        """
+        import logging
+        import time
+        logger = logging.getLogger('canslim.gui')
+
+        global _polygon_price_cache, _polygon_cache_time
+
+        try:
+            api_key = self.polygon_api_key
+            if not api_key:
+                logger.debug("No Polygon API key provided for price fallback")
+                return {}
+
+            # Check if cache is still valid
+            now = time.time()
+            if now - _polygon_cache_time < _POLYGON_CACHE_TTL:
+                # Return cached prices for requested symbols
+                cached = {s: _polygon_price_cache[s] for s in symbols if s in _polygon_price_cache}
+                if cached:
+                    logger.debug(f"Using cached Polygon prices for: {list(cached.keys())} (age: {now - _polygon_cache_time:.0f}s)")
+                    return cached
+
+            # Cache expired or empty - fetch fresh data
+            logger.debug(f"Fetching fresh Polygon data for: {symbols}")
+            from polygon import RESTClient
+            client = RESTClient(api_key=api_key)
+
+            prices = {}
+            for symbol in symbols:
+                try:
+                    # Get previous day's close (most reliable for free tier)
+                    aggs = client.get_previous_close_agg(symbol)
+                    if aggs and len(aggs) > 0:
+                        bar = aggs[0]
+                        prices[symbol] = {
+                            'last': bar.close,
+                            'close': bar.close,
+                            'open': bar.open,
+                            'high': bar.high,
+                            'low': bar.low,
+                            'volume': bar.volume,
+                        }
+                        logger.debug(f"Polygon {symbol}: ${bar.close:.2f}")
+                except Exception as e:
+                    logger.debug(f"Polygon fetch error for {symbol}: {e}")
+
+            # Update cache if we got any data
+            if prices:
+                _polygon_price_cache.update(prices)
+                _polygon_cache_time = now
+                logger.debug(f"Updated Polygon cache with {len(prices)} symbols")
+
+            return prices
+        except Exception as e:
+            logger.error(f"Polygon fallback failed: {e}")
+            return {}
 
 
 class MarketRegimeBanner(QFrame):
@@ -208,15 +301,21 @@ class MarketRegimeBanner(QFrame):
         def format_futures(pct, label):
             if pct is None:
                 return f"{label}: --"
-            color = "#28A745" if pct >= 0 else "#DC3545"  # Green/Red
+            # Color code: green=bullish, red=bearish, grey=neutral (within ±0.1%)
+            if abs(pct) < 0.1:
+                color = "#888888"  # Grey for neutral
+            elif pct > 0:
+                color = "#28A745"  # Green for bullish
+            else:
+                color = "#DC3545"  # Red for bearish
             return f"<span style='color:{color}'>{label}: {pct:+.2f}%</span>"
-        
+
         self.es_label.setText(format_futures(es_pct, "ES"))
         self.es_label.setTextFormat(Qt.TextFormat.RichText)
-        
+
         self.nq_label.setText(format_futures(nq_pct, "NQ"))
         self.nq_label.setTextFormat(Qt.TextFormat.RichText)
-        
+
         self.ym_label.setText(format_futures(ym_pct, "YM"))
         self.ym_label.setTextFormat(Qt.TextFormat.RichText)
     
@@ -249,8 +348,8 @@ class MarketRegimeBanner(QFrame):
         top_row.setStyleSheet("font-size: 11px;")
         box_layout.addWidget(top_row)
         
-        # Middle row: Day % | Week %
-        change_row = QLabel("<span style='color:#888'>D:</span>-- <span style='color:#888'>W:</span>--")
+        # Middle row: Open/Week % | Day %
+        change_row = QLabel("<span style='color:#888'>O:</span>-- <span style='color:#888'>D:</span>--")
         change_row.setTextFormat(Qt.TextFormat.RichText)
         change_row.setStyleSheet("font-size: 10px;")
         box_layout.addWidget(change_row)
@@ -309,17 +408,19 @@ class MarketRegimeBanner(QFrame):
         if iwm:
             self.iwm_box.top_label.setText(f"<b>IWM</b> ${iwm:.2f}")
     
-    def update_index_box(self, symbol: str, price: float = None, day_pct: float = None, 
-                         week_pct: float = None, sma21: float = None, sma50: float = None, 
-                         sma200: float = None):
+    def update_index_box(self, symbol: str, price: float = None, day_pct: float = None,
+                         open_pct: float = None, week_pct: float = None,
+                         sma21: float = None, sma50: float = None, sma200: float = None):
         """
         Update a single index box with all data.
-        
+        Only updates fields that have actual values - None values preserve existing display.
+
         Args:
             symbol: 'SPY', 'QQQ', 'DIA', or 'IWM'
             price: Current price
-            day_pct: Day change percentage
-            week_pct: Week change percentage
+            day_pct: Day change percentage (from previous close)
+            open_pct: Change from today's open (includes premarket) - used when live
+            week_pct: Week change percentage - used as fallback when open_pct unavailable
             sma21: % distance from 21-day SMA
             sma50: % distance from 50-day SMA
             sma200: % distance from 200-day SMA
@@ -328,38 +429,56 @@ class MarketRegimeBanner(QFrame):
         box = getattr(self, f"{symbol.lower()}_box", None)
         if not box:
             return
-        
-        # Helper for color coding (compact format without %)
+
+        # Helper for color coding: green=bull, red=bear, grey=neutral (±0.1%)
         def color_pct(val, show_pct=True):
             if val is None:
                 return "#888", "--"
-            color = '#28A745' if val >= 0 else '#DC3545'
+            # Color code with grey for neutral
+            if abs(val) < 0.1:
+                color = '#888888'  # Grey for neutral
+            elif val > 0:
+                color = '#28A745'  # Green for bullish
+            else:
+                color = '#DC3545'  # Red for bearish
             if show_pct:
                 return color, f"{val:+.1f}%"
             else:
                 return color, f"{val:+.1f}"
-        
-        # Update top row (symbol + price)
-        price_str = f"${price:.2f}" if price is not None else "$---"
-        box.top_label.setText(f"<b>{symbol}</b> {price_str}")
-        
-        # Update change row (day/week %)
-        d_color, d_text = color_pct(day_pct)
-        w_color, w_text = color_pct(week_pct)
-        box.change_label.setText(
-            f"<span style='color:#888'>D:</span><span style='color:{d_color}'>{d_text}</span> "
-            f"<span style='color:#888'>W:</span><span style='color:{w_color}'>{w_text}</span>"
-        )
-        
-        # Update SMA row (compact - no % symbol)
-        s21_color, s21_text = color_pct(sma21, show_pct=False)
-        s50_color, s50_text = color_pct(sma50, show_pct=False)
-        s200_color, s200_text = color_pct(sma200, show_pct=False)
-        box.sma_label.setText(
-            f"<span style='color:#888'>21:</span><span style='color:{s21_color}'>{s21_text}</span> "
-            f"<span style='color:#888'>50:</span><span style='color:{s50_color}'>{s50_text}</span> "
-            f"<span style='color:#888'>200:</span><span style='color:{s200_color}'>{s200_text}</span>"
-        )
+
+        # Update top row (symbol + price) - ONLY if price provided
+        if price is not None:
+            price_str = f"${price:.2f}"
+            box.top_label.setText(f"<b>{symbol}</b> {price_str}")
+
+        # Update change row - ONLY if at least one change value provided
+        if open_pct is not None or week_pct is not None or day_pct is not None:
+            # Show O (open change) if available, else W (week change)
+            if open_pct is not None:
+                o_color, o_text = color_pct(open_pct)
+                label = "O"  # Open change (live)
+            elif week_pct is not None:
+                o_color, o_text = color_pct(week_pct)
+                label = "W"  # Week change (historical fallback)
+            else:
+                o_color, o_text = "#888", "--"
+                label = "O"
+            d_color, d_text = color_pct(day_pct)
+            box.change_label.setText(
+                f"<span style='color:#888'>{label}:</span><span style='color:{o_color}'>{o_text}</span> "
+                f"<span style='color:#888'>D:</span><span style='color:{d_color}'>{d_text}</span>"
+            )
+
+        # Update SMA row - ONLY if at least one SMA value provided
+        if sma21 is not None or sma50 is not None or sma200 is not None:
+            s21_color, s21_text = color_pct(sma21, show_pct=False)
+            s50_color, s50_text = color_pct(sma50, show_pct=False)
+            s200_color, s200_text = color_pct(sma200, show_pct=False)
+            box.sma_label.setText(
+                f"<span style='color:#888'>21:</span><span style='color:{s21_color}'>{s21_text}</span> "
+                f"<span style='color:#888'>50:</span><span style='color:{s50_color}'>{s50_text}</span> "
+                f"<span style='color:#888'>200:</span><span style='color:{s200_color}'>{s200_text}</span>"
+            )
     
     def update_sma(self, spy_sma: dict = None, qqq_sma: dict = None):
         """
@@ -456,72 +575,94 @@ class MarketRegimeDialog(QDialog):
         QApplication.processEvents()
     
     def show_results(self, results: dict):
-        """Display the analysis results in Discord-like format."""
+        """Display the analysis results matching the Discord alert format."""
         self.progress_group.setVisible(False)
         self.results_group.setVisible(True)
         self.close_btn.setEnabled(True)
-        
-        # Build formatted output similar to Discord message
+
         lines = []
-        
+
         # Header
-        lines.append("═" * 50)
+        lines.append("━" * 50)
         lines.append("🏛️ MORNING MARKET REGIME ALERT")
         lines.append(f"   {results.get('date', 'Today')}")
-        lines.append("═" * 50)
+        lines.append("━" * 50)
+
+        # IBD Status (if available)
+        ibd_status = results.get('ibd_status')
+        if ibd_status:
+            ibd_emoji = {"CONFIRMED_UPTREND": "🟢", "UPTREND_UNDER_PRESSURE": "🟡",
+                         "RALLY_ATTEMPT": "🟠", "CORRECTION": "🔴"}.get(ibd_status, "⚪")
+            exposure = results.get('exposure', '40-60%')
+            lines.append(f"📊 IBD STATUS: {ibd_emoji} {ibd_status.replace('_', ' ')} | {exposure}")
+            lines.append("")
+
+        # D-Day Count (compact table)
+        lines.append("📊 D-DAY COUNT (25-Day Rolling)")
+        spy_count = results.get('spy_count', 0)
+        qqq_count = results.get('qqq_count', 0)
+        spy_delta = results.get('spy_delta', 0)
+        qqq_delta = results.get('qqq_delta', 0)
+        trend = results.get('trend', 'STABLE')
+        trend_emoji = "🔴" if trend == "WORSENING" else "🟢" if trend == "IMPROVING" else "🟡"
+
+        lines.append("┌───────┬─────┬──────┬────────────┐")
+        lines.append("│ Index │ Cnt │ 5d Δ │ Trend      │")
+        lines.append("├───────┼─────┼──────┼────────────┤")
+        lines.append(f"│ SPY   │  {spy_count}  │  {spy_delta:+2d}  │ {trend:<10} │")
+        lines.append(f"│ QQQ   │  {qqq_count}  │  {qqq_delta:+2d}  │ {trend:<10} │")
+        lines.append("└───────┴─────┴──────┴────────────┘")
+        lines.append(f"{trend_emoji} Trend: {trend}")
         lines.append("")
-        
-        # Distribution Day Count
-        lines.append("📊 DISTRIBUTION DAY COUNT (Rolling 25-Day)")
-        lines.append("─" * 50)
-        lines.append(f"{'Index':<8} {'Count':^8} {'5-Day Î”':^10} {'Trend':^12}")
-        lines.append("─" * 50)
-        
-        spy_trend = results.get('trend', 'STABLE')
-        qqq_trend = results.get('trend', 'STABLE')
-        trend_emoji = "🔴" if spy_trend == "WORSENING" else "🟢" if spy_trend == "IMPROVING" else "🟡"
-        
-        lines.append(f"{'SPY':<8} {results.get('spy_count', 0):^8} {results.get('spy_delta', 0):^+10d} {trend_emoji} {spy_trend:^10}")
-        lines.append(f"{'QQQ':<8} {results.get('qqq_count', 0):^8} {results.get('qqq_delta', 0):^+10d} {trend_emoji} {qqq_trend:^10}")
-        lines.append("")
-        
+
         # D-Day Histogram
         if results.get('spy_dates') or results.get('qqq_dates'):
-            lines.append("📅 D-DAY HISTOGRAM (25-Day Rolling Window)")
-            lines.append("─" * 50)
-            lines.append(f"         ← 25 days ago              Today →")
-            
+            lines.append("📅 D-Day Timeline (■=D-day)")
             spy_histogram = self._build_histogram(results.get('spy_dates', []), results.get('lookback_start'))
             qqq_histogram = self._build_histogram(results.get('qqq_dates', []), results.get('lookback_start'))
-            
-            lines.append(f"SPY [{results.get('spy_count', 0)}]: {spy_histogram}")
-            lines.append(f"QQQ [{results.get('qqq_count', 0)}]: {qqq_histogram}")
+            lines.append(f"SPY[{spy_count}]: {spy_histogram}")
+            lines.append(f"QQQ[{qqq_count}]: {qqq_histogram}")
+            lines.append("        ← 5wk ago          Today →")
             lines.append("")
-        
-        # Market Phase
-        lines.append("🔄 MARKET PHASE")
-        lines.append("─" * 50)
+
+        # Market Phase / FTD
+        lines.append("🎯 MARKET PHASE")
         phase = results.get('market_phase', 'UNKNOWN')
-        phase_emoji = "🟢" if "UPTREND" in phase else "🔴" if "CORRECTION" in phase else "🟡"
-        lines.append(f"   {phase_emoji} {phase}")
-        
+        phase_emoji = {"CONFIRMED_UPTREND": "🟢", "UPTREND_PRESSURE": "🟡",
+                       "RALLY_ATTEMPT": "🟠", "CORRECTION": "🔴"}.get(phase, "⚪")
+        lines.append(f"   {phase_emoji} {phase.replace('_', ' ')}")
+
         if results.get('in_rally_attempt'):
-            lines.append(f"   Rally Day: {results.get('rally_day', 0)}")
+            rally_day = results.get('rally_day', 0)
+            visual = '+' * min(rally_day, 10)
+            if results.get('has_confirmed_ftd'):
+                visual = visual[:-1] + '✓' if visual else '✓'
+            lines.append(f"   Day {rally_day}: [{visual}]")
         if results.get('has_confirmed_ftd'):
-            lines.append(f"   ✅ FTD Confirmed")
+            lines.append("   ✅ Follow-Through Day Confirmed")
         lines.append("")
-        
-        # Index Performance Section
+
+        # Entry Risk (if available)
+        entry_risk = results.get('entry_risk_level')
+        entry_score = results.get('entry_risk_score', 0)
+        if entry_risk:
+            risk_emoji = {"LOW": "🟢", "MODERATE": "🟡", "ELEVATED": "🟠", "HIGH": "🔴"}.get(entry_risk, "⚪")
+            lines.append(f"⚠️ ENTRY RISK: {risk_emoji} {entry_risk} ({entry_score:+.2f})")
+            lines.append("")
+
+        # Index Performance Table (KEEP THIS - user requested)
+        lines.append("━" * 50)
+        lines.append("📈 INDEX PERFORMANCE")
         spy_stats = results.get('spy_stats', {})
         qqq_stats = results.get('qqq_stats', {})
         dia_stats = results.get('dia_stats', {})
         iwm_stats = results.get('iwm_stats', {})
+
         if spy_stats or qqq_stats:
-            lines.append("📈 INDEX PERFORMANCE")
-            lines.append("─" * 60)
-            lines.append(f"{'Index':<6} {'Price':^10} {'Day':^8} {'Week':^8} {'21-SMA':^8} {'50-SMA':^8} {'200-SMA':^8}")
-            lines.append("─" * 60)
-            
+            lines.append("┌───────┬──────────┬────────┬────────┬────────┬────────┬─────────┐")
+            lines.append("│ Index │  Price   │  Day   │  Week  │ 21-SMA │ 50-SMA │ 200-SMA │")
+            lines.append("├───────┼──────────┼────────┼────────┼────────┼────────┼─────────┤")
+
             for symbol, stats in [('SPY', spy_stats), ('QQQ', qqq_stats), ('DIA', dia_stats), ('IWM', iwm_stats)]:
                 if stats:
                     price = stats.get('price', 0)
@@ -530,57 +671,56 @@ class MarketRegimeDialog(QDialog):
                     s21 = stats.get('sma21', 0)
                     s50 = stats.get('sma50', 0)
                     s200 = stats.get('sma200', 0)
-                    lines.append(f"{symbol:<6} ${price:>8.2f} {day:>+7.1f}% {week:>+7.1f}% {s21:>+7.1f}% {s50:>+7.1f}% {s200:>+7.1f}%")
-            lines.append("")
-        
-        # Composite Score
-        lines.append("🏆 COMPOSITE MARKET REGIME SCORE")
-        lines.append("─" * 50)
+                    lines.append(f"│ {symbol:<5} │ ${price:>7.2f} │ {day:>+5.1f}% │ {week:>+5.1f}% │ {s21:>+5.1f}% │ {s50:>+5.1f}% │ {s200:>+6.1f}% │")
+
+            lines.append("└───────┴──────────┴────────┴────────┴────────┴────────┴─────────┘")
+        lines.append("")
+
+        # Composite Score & Regime
+        lines.append("━" * 50)
         score = results.get('composite_score', 0)
         regime = results.get('regime', 'NEUTRAL')
-        
+        regime_emoji = "🟢" if regime == "BULLISH" else "🔴" if regime == "BEARISH" else "🟡"
+
         # Score bar visualization
-        score_normalized = (score + 1.5) / 3.0  # Normalize -1.5 to +1.5 → 0 to 1
+        score_normalized = (score + 1.5) / 3.0
         score_normalized = max(0, min(1, score_normalized))
-        bar_width = 40
+        bar_width = 30
         filled = int(score_normalized * bar_width)
         bar = "█" * filled + "░" * (bar_width - filled)
-        
-        regime_emoji = "🟢" if regime == "BULLISH" else "🔴" if regime == "BEARISH" else "🟡"
-        
-        lines.append(f"   Score: {score:+.2f} / 1.50")
+
+        lines.append(f"🏆 REGIME: {regime_emoji} {regime} (Score: {score:+.2f})")
         lines.append(f"   [{bar}]")
-        lines.append(f"   {regime_emoji} {regime}")
-        lines.append("")
-        
-        # Exposure Recommendation
-        lines.append("💰 EXPOSURE RECOMMENDATION")
-        lines.append("─" * 50)
+
+        # Exposure
         exposure = results.get('exposure', '40-60%')
-        lines.append(f"   Suggested: {exposure}")
+        lines.append(f"💰 EXPOSURE: {exposure}")
         lines.append("")
-        
-        # Guidance
+
+        # Guidance (compact)
         lines.append("📋 GUIDANCE")
-        lines.append("─" * 50)
-        if regime == "BEARISH":
-            lines.append("   → Defensive posture - raise cash")
-            lines.append("   → Avoid new long positions")
-            lines.append("   → Wait for follow-through day signal")
-        elif regime == "NEUTRAL":
-            lines.append("   → Cautious positioning")
+        max_d = max(spy_count, qqq_count)
+        if max_d >= 6:
+            lines.append(f"   ⚠️ High D-days ({max_d}) - defensive posture")
+
+        if regime == "BEARISH" or phase == "CORRECTION":
+            lines.append("   → Honor stops strictly")
+            lines.append("   → Avoid new breakout entries")
+            lines.append("   → Wait for follow-through day")
+        elif regime == "NEUTRAL" or "PRESSURE" in phase:
             lines.append("   → Reduce position sizes")
-            lines.append("   → Focus on strongest setups only")
-        else:  # BULLISH
-            lines.append("   → Favorable for new positions")
+            lines.append("   → Only highest-conviction setups")
+            lines.append("   → Tighten stops on existing")
+        else:
+            lines.append("   → Environment supports new positions")
             lines.append("   → Look for breakouts from sound bases")
             lines.append("   → Let winners run")
-        
+
         lines.append("")
-        lines.append("═" * 50)
-        
+        lines.append("━" * 50)
+
         self.results_text.setText("\n".join(lines))
-    
+
     def _build_histogram(self, dates: list, lookback_start=None) -> str:
         """Build a simple text histogram of distribution days."""
         from datetime import date, timedelta
@@ -741,7 +881,10 @@ class KanbanMainWindow(QMainWindow):
         # Columns by state
         self.columns: Dict[int, KanbanColumn] = {}
         self.closed_panel: Optional[ClosedPositionsPanel] = None
-        
+
+        # Card tracking for incremental price updates (symbol -> card)
+        self._cards_by_symbol: Dict[str, 'PositionCard'] = {}
+
         # IBKR client (lazy initialized)
         self.ibkr_client = None
         self.ibkr_connected = False
@@ -754,10 +897,22 @@ class KanbanMainWindow(QMainWindow):
         # Child windows
         self._table_view = None  # Position database spreadsheet view
         
-        # Price update timer (5 second interval)
+        # GUI refresh intervals from config (with sensible defaults)
+        gui_config = self.config.get('gui', {})
+        price_interval = gui_config.get('price_refresh_interval', 60)  # Default 60 seconds
+        futures_interval = gui_config.get('futures_refresh_interval', 30)  # Default 30 seconds
+
+        # Price update timer
         self.price_timer = QTimer()
         self.price_timer.timeout.connect(self._update_prices)
-        self.price_update_interval = 5000  # 5 seconds
+        self.price_update_interval = price_interval * 1000  # Convert to ms
+
+        # Futures update timer
+        self.futures_timer = QTimer()
+        self.futures_timer.timeout.connect(self._update_futures)
+        self.futures_update_interval = futures_interval * 1000  # Convert to ms
+
+        self.logger.info(f"GUI refresh intervals: prices={price_interval}s, futures={futures_interval}s")
 
         # Google Sheets auto-sync timer
         self.auto_sync_timer = QTimer()
@@ -779,6 +934,7 @@ class KanbanMainWindow(QMainWindow):
         self._setup_menu()
         self._load_positions()
         self._load_market_regime()  # Load regime data from database
+        self._load_index_stats()    # Load index SMAs in background
     
     def _setup_ui(self):
         """Set up the main window UI."""
@@ -879,7 +1035,15 @@ class KanbanMainWindow(QMainWindow):
         add_action.setShortcut("Ctrl+N")
         add_action.triggered.connect(lambda: self._on_add_clicked(0))
         position_menu.addAction(add_action)
-        
+
+        score_action = QAction("📊 &Score Symbol...", self)
+        score_action.setShortcut("Ctrl+Shift+S")
+        score_action.setToolTip("Preview score for a symbol before adding to watchlist")
+        score_action.triggered.connect(self._on_score_symbol)
+        position_menu.addAction(score_action)
+
+        position_menu.addSeparator()
+
         refresh_action = QAction("&Refresh Prices", self)
         refresh_action.setShortcut("F5")
         refresh_action.triggered.connect(self._update_prices)
@@ -936,6 +1100,16 @@ class KanbanMainWindow(QMainWindow):
         regime_action.triggered.connect(self._on_run_market_regime)
         service_menu.addAction(regime_action)
 
+        service_menu.addSeparator()
+
+        earnings_action = QAction("&Update All Earnings Dates", self)
+        earnings_action.triggered.connect(self._on_update_all_earnings)
+        service_menu.addAction(earnings_action)
+
+        volume_action = QAction("&Seed 50-Day Volume Data", self)
+        volume_action.triggered.connect(self._on_seed_volume_data)
+        service_menu.addAction(volume_action)
+
         # Reports menu
         reports_menu = menubar.addMenu("&Reports")
 
@@ -973,14 +1147,19 @@ class KanbanMainWindow(QMainWindow):
             for column in self.columns.values():
                 column.clear_cards()
             self.closed_panel.clear_cards()
-            
+            self._cards_by_symbol.clear()  # Clear card tracking
+
             # Add cards to appropriate columns
             closed_count = 0
             for pos in positions:
                 # Get the latest alert for this position (if any)
                 latest_alert = latest_alerts.get(pos.id)
                 card = self._create_card(pos, latest_alert=latest_alert)
-                
+
+                # Track card by symbol for incremental updates
+                if pos.symbol:
+                    self._cards_by_symbol[pos.symbol] = card
+
                 if pos.state < 0:
                     # Closed/stopped positions
                     self.closed_panel.add_card(card)
@@ -1150,7 +1329,141 @@ class KanbanMainWindow(QMainWindow):
         finally:
             if close_session and session:
                 session.close()
-    
+
+    def _load_index_stats(self, background: bool = True):
+        """
+        Load index statistics (prices, SMAs) from Polygon API.
+
+        Called on GUI startup and after IBKR connects to populate SMA data.
+
+        Args:
+            background: If True, run in background thread (non-blocking)
+        """
+        if background:
+            # Run in background to avoid blocking GUI
+            import threading
+            thread = threading.Thread(target=self._fetch_and_update_index_stats, daemon=True)
+            thread.start()
+        else:
+            self._fetch_and_update_index_stats()
+
+    def _fetch_and_update_index_stats(self):
+        """Fetch index data from Polygon and update banner with SMAs."""
+        try:
+            import yaml
+
+            # Load config for API key
+            config = getattr(self, 'config', {}) or {}
+            if not config:
+                config_paths = ['user_config.yaml', 'config.yaml']
+                for path in config_paths:
+                    import os
+                    if os.path.exists(path):
+                        with open(path, 'r') as f:
+                            config = yaml.safe_load(f) or {}
+                        break
+
+            polygon_key = (
+                config.get('market_data', {}).get('api_key') or
+                config.get('polygon', {}).get('api_key')
+            )
+
+            if not polygon_key:
+                self.logger.debug("No Polygon API key - skipping index stats load")
+                return
+
+            self.logger.info("Loading index stats from Polygon...")
+
+            # Import and fetch data
+            from canslim_monitor.regime.historical_data import fetch_index_daily
+
+            api_config = {'polygon': {'api_key': polygon_key}}
+            data = fetch_index_daily(
+                symbols=['SPY', 'QQQ', 'DIA', 'IWM'],
+                lookback_days=300,  # Need 300 calendar days to get 200+ trading days for SMA
+                config=api_config,
+                use_indices=False
+            )
+
+            if not data:
+                self.logger.warning("No data returned from Polygon")
+                return
+
+            spy_bars = data.get('SPY', [])
+            qqq_bars = data.get('QQQ', [])
+            dia_bars = data.get('DIA', [])
+            iwm_bars = data.get('IWM', [])
+
+            self.logger.info(
+                f"Fetched bars - SPY: {len(spy_bars)}, QQQ: {len(qqq_bars)}, "
+                f"DIA: {len(dia_bars)}, IWM: {len(iwm_bars)} "
+                f"(need 200+ for 200-day SMA)"
+            )
+            if len(spy_bars) < 200:
+                self.logger.warning(f"SPY has only {len(spy_bars)} bars - 200 SMA will show 0")
+
+            # Calculate stats
+            spy_stats = self._calculate_index_stats(spy_bars) if spy_bars else {}
+            qqq_stats = self._calculate_index_stats(qqq_bars) if qqq_bars else {}
+            dia_stats = self._calculate_index_stats(dia_bars) if dia_bars else {}
+            iwm_stats = self._calculate_index_stats(iwm_bars) if iwm_bars else {}
+
+            # Update banner (must be done on main thread)
+            from PyQt6.QtCore import QMetaObject, Qt, Q_ARG
+
+            # Use invokeMethod to safely update from background thread
+            if spy_stats:
+                self._update_index_box_safe('SPY', spy_stats)
+                self._cached_spy_stats = {
+                    'week_pct': spy_stats.get('week_pct'),
+                    'sma21': spy_stats.get('sma21'),
+                    'sma50': spy_stats.get('sma50'),
+                    'sma200': spy_stats.get('sma200')
+                }
+            if qqq_stats:
+                self._update_index_box_safe('QQQ', qqq_stats)
+                self._cached_qqq_stats = {
+                    'week_pct': qqq_stats.get('week_pct'),
+                    'sma21': qqq_stats.get('sma21'),
+                    'sma50': qqq_stats.get('sma50'),
+                    'sma200': qqq_stats.get('sma200')
+                }
+            if dia_stats:
+                self._update_index_box_safe('DIA', dia_stats)
+                self._cached_dia_stats = {
+                    'week_pct': dia_stats.get('week_pct'),
+                    'sma21': dia_stats.get('sma21'),
+                    'sma50': dia_stats.get('sma50'),
+                    'sma200': dia_stats.get('sma200')
+                }
+            if iwm_stats:
+                self._update_index_box_safe('IWM', iwm_stats)
+                self._cached_iwm_stats = {
+                    'week_pct': iwm_stats.get('week_pct'),
+                    'sma21': iwm_stats.get('sma21'),
+                    'sma50': iwm_stats.get('sma50'),
+                    'sma200': iwm_stats.get('sma200')
+                }
+
+            self.logger.info("Index stats loaded successfully")
+
+        except Exception as e:
+            self.logger.warning(f"Could not load index stats: {e}")
+
+    def _update_index_box_safe(self, symbol: str, stats: dict):
+        """Thread-safe update of index box via signal."""
+        from PyQt6.QtCore import QTimer
+        # Use QTimer.singleShot to run on main thread
+        QTimer.singleShot(0, lambda: self.regime_banner.update_index_box(
+            symbol,
+            price=stats.get('price'),
+            day_pct=stats.get('day_pct'),
+            week_pct=stats.get('week_pct'),
+            sma21=stats.get('sma21'),
+            sma50=stats.get('sma50'),
+            sma200=stats.get('sma200')
+        ))
+
     def _ensure_regime_tables(self):
         """Ensure regime tables exist in the database."""
         try:
@@ -1357,17 +1670,19 @@ class KanbanMainWindow(QMainWindow):
                     )
                 """))
                 
-                # Create history table
+                # Create history table (schema matches regime/models_regime.py)
                 session.execute(text("""
                     CREATE TABLE IF NOT EXISTS ibd_exposure_history (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        effective_date DATE NOT NULL,
                         market_status VARCHAR(30) NOT NULL,
                         exposure_min INTEGER NOT NULL,
                         exposure_max INTEGER NOT NULL,
-                        notes TEXT,
-                        changed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                        changed_by VARCHAR(50) DEFAULT 'user',
-                        source VARCHAR(20) DEFAULT 'manual'
+                        distribution_days_spy INTEGER,
+                        distribution_days_qqq INTEGER,
+                        notes VARCHAR(500),
+                        source VARCHAR(50) DEFAULT 'MarketSurge',
+                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
                     )
                 """))
                 
@@ -1404,12 +1719,13 @@ class KanbanMainWindow(QMainWindow):
                 
                 # Record history
                 session.execute(text("""
-                    INSERT INTO ibd_exposure_history 
-                    (market_status, exposure_min, exposure_max, notes, changed_at)
-                    VALUES (:status, :min, :max, :notes, :changed)
+                    INSERT INTO ibd_exposure_history
+                    (effective_date, market_status, exposure_min, exposure_max, notes, source, created_at)
+                    VALUES (:effective_date, :status, :min, :max, :notes, :source, :created_at)
                 """), {
+                    'effective_date': datetime.now().date(),
                     'status': status, 'min': min_exp, 'max': max_exp,
-                    'notes': notes, 'changed': datetime.now()
+                    'notes': notes, 'source': 'GUI', 'created_at': datetime.now()
                 })
                 
                 session.commit()
@@ -1673,6 +1989,19 @@ class KanbanMainWindow(QMainWindow):
                 'e2_price': position.e2_price,
                 'e3_shares': position.e3_shares,
                 'e3_price': position.e3_price,
+                # Exit / Close
+                'tp1_sold': position.tp1_sold,
+                'tp1_price': position.tp1_price,
+                'tp1_date': position.tp1_date,
+                'tp2_sold': position.tp2_sold,
+                'tp2_price': position.tp2_price,
+                'tp2_date': position.tp2_date,
+                'close_price': position.close_price,
+                'close_date': position.close_date,
+                'close_reason': position.close_reason,
+                'realized_pnl': position.realized_pnl,
+                'realized_pnl_pct': position.realized_pnl_pct,
+                # Dates
                 'watch_date': position.watch_date,
                 'breakout_date': position.breakout_date,
                 'earnings_date': position.earnings_date,
@@ -1699,18 +2028,37 @@ class KanbanMainWindow(QMainWindow):
         """Handle EditPositionDialog accepted."""
         if not hasattr(self, '_edit_dialog') or not self._edit_dialog:
             return
-        
+
         result = self._edit_dialog.get_result()
         position_id = self._edit_position_id
         symbol = self._edit_symbol
-        
+
+        # Logging for edit save (INFO level for visibility)
+        self.logger.info(f"=== EDIT SAVE: {symbol} (id={position_id}) ===")
+        key_fields = ['stop_price', 'pivot', 'hard_stop_pct', 'pattern', 'base_stage',
+                      'close_price', 'close_date', 'close_reason', 'realized_pnl', 'realized_pnl_pct',
+                      'tp1_sold', 'tp1_price', 'tp2_sold', 'tp2_price']
+        for key in key_fields:
+            if key in result and result[key] is not None:
+                self.logger.info(f"  INPUT {key}: {result[key]}")
+
         session = self.db.get_new_session()
         try:
             repos = RepositoryManager(session)
-            
+
             # Update position
             repos.positions.update_by_id(position_id, **result)
             session.commit()
+
+            # Verify save by re-reading from database
+            updated_position = repos.positions.get_by_id(position_id)
+            if updated_position:
+                self.logger.info(f"  SAVED stop_price: {updated_position.stop_price}")
+                self.logger.info(f"  SAVED pivot: {updated_position.pivot}")
+                self.logger.info(f"  SAVED hard_stop_pct: {updated_position.hard_stop_pct}")
+                self.logger.info(f"  SAVED close_price: {updated_position.close_price}")
+                self.logger.info(f"  SAVED close_date: {updated_position.close_date}")
+                self.logger.info(f"  SAVED realized_pnl: {updated_position.realized_pnl}")
             
             self.status_bar.showMessage(f"Updated {symbol}")
             self._load_positions()
@@ -1750,7 +2098,11 @@ class KanbanMainWindow(QMainWindow):
             # View alerts action
             alerts_action = menu.addAction("🔔 View Alerts")
             alerts_action.triggered.connect(lambda: self._show_position_alerts(position.symbol, position_id))
-            
+
+            # Check alerts action (real-time status check)
+            check_alerts_action = menu.addAction("🔍 Check Alerts")
+            check_alerts_action.triggered.connect(lambda: self._check_position_alerts(position_id))
+
             menu.addSeparator()
             
             # State transition actions
@@ -1909,7 +2261,227 @@ class KanbanMainWindow(QMainWindow):
         except Exception as e:
             self.logger.error(f"Error showing position alerts: {e}")
             QMessageBox.warning(self, "Error", f"Failed to load alerts: {e}")
-    
+
+    def _check_position_alerts(self, position_id: int):
+        """
+        Run real-time alert checks against a position.
+
+        This is a status check tool that runs checkers against the position
+        with current data. It does NOT store alerts in the database or send
+        Discord notifications.
+
+        Routing:
+        - State 0 (Watching): Runs breakout checks (pivot, volume, buy zone)
+        - State 1+ (Positions): Runs position checks (stop, profit, pyramid, MA, health)
+        """
+        try:
+            from canslim_monitor.gui.alerts.alert_check_dialog import AlertCheckDialog
+            from canslim_monitor.services.technical_data_service import TechnicalDataService
+
+            session = self.db.get_new_session()
+            try:
+                repos = RepositoryManager(session)
+                position = repos.positions.get_by_id(position_id)
+
+                if not position:
+                    QMessageBox.warning(self, "Error", "Position not found")
+                    return
+
+                # Get current price - use last_price from position or try to get fresh price
+                current_price = position.last_price or position.pivot or 0
+
+                if current_price <= 0:
+                    QMessageBox.warning(
+                        self,
+                        "No Price Data",
+                        f"No price data available for {position.symbol}. "
+                        "Try refreshing prices first."
+                    )
+                    return
+
+                # Get market regime if available
+                market_regime = ""
+                try:
+                    latest_regime = repos.market_regime.get_latest()
+                    if latest_regime:
+                        market_regime = latest_regime.regime
+                except Exception:
+                    pass
+
+                # Route based on position state
+                if position.state == 0:
+                    # WATCHING (State 0) → Breakout checks
+                    alerts, position_summary, check_summary = self._run_breakout_checks(
+                        position, current_price, market_regime
+                    )
+                else:
+                    # POSITION (State 1+) → Position checks
+                    alerts, position_summary, check_summary = self._run_position_checks(
+                        position, current_price, market_regime
+                    )
+
+                # Show dialog
+                dialog = AlertCheckDialog(
+                    symbol=position.symbol,
+                    position_summary=position_summary,
+                    alerts=alerts,
+                    check_summary=check_summary,
+                    parent=self,
+                )
+                dialog.show()  # Modeless
+
+                self.logger.info(
+                    f"Alert check for {position.symbol}: {len(alerts)} alerts at ${current_price:.2f}"
+                )
+
+            finally:
+                session.close()
+
+        except Exception as e:
+            self.logger.error(f"Error checking position alerts: {e}")
+            import traceback
+            traceback.print_exc()
+            QMessageBox.warning(self, "Error", f"Failed to check alerts: {e}")
+
+    def _run_breakout_checks(self, position, current_price: float, market_regime: str):
+        """
+        Run breakout checks for watchlist (State 0) positions.
+
+        Returns:
+            Tuple of (alerts, position_summary, check_summary)
+        """
+        from canslim_monitor.core.position_monitor.breakout_checker_tool import BreakoutCheckerTool
+
+        # Get volume data from position attributes
+        volume = getattr(position, 'last_volume', 0) or 0
+        avg_volume = getattr(position, 'avg_volume_50d', 0) or 500000
+        high = getattr(position, 'last_high', current_price) or current_price
+        low = getattr(position, 'last_low', current_price) or current_price
+
+        # Create breakout checker tool
+        checker_tool = BreakoutCheckerTool(
+            config=self.config,
+            logger=self.logger
+        )
+
+        # Run breakout checks
+        alerts = checker_tool.check_position(
+            position=position,
+            current_price=current_price,
+            volume=volume,
+            avg_volume=avg_volume,
+            high=high,
+            low=low,
+            market_regime=market_regime,
+        )
+
+        # Build position summary for dialog header (watchlist-specific)
+        pivot = position.pivot or 0
+        distance_pct = ((current_price - pivot) / pivot * 100) if pivot > 0 else 0
+        buy_zone_top = pivot * 1.05 if pivot > 0 else 0
+
+        state_name = ""
+        if position.state in STATES:
+            state_name = f"{STATES[position.state].display_name} ({position.state})"
+
+        position_summary = {
+            'current_price': current_price,
+            'entry_price': pivot,  # Pivot serves as reference for watchlist
+            'pnl_pct': distance_pct,  # Distance from pivot
+            'state_name': state_name,
+        }
+
+        # Build check summary showing breakout-specific data
+        # Calculate RVOL for display
+        rvol = checker_tool._calculate_rvol(volume, avg_volume) if volume > 0 else 0
+
+        check_summary = {
+            'checkers_run': ['breakout'],
+            'technical_data': {
+                'pivot': pivot,
+                'buy_zone_top': buy_zone_top,
+                'volume': volume,
+                'avg_volume': avg_volume,
+                'rvol': rvol,
+            },
+            'is_breakout_check': True,  # Flag for dialog to customize display
+        }
+
+        return alerts, position_summary, check_summary
+
+    def _run_position_checks(self, position, current_price: float, market_regime: str):
+        """
+        Run position checks for active positions (State 1+).
+
+        Returns:
+            Tuple of (alerts, position_summary, check_summary)
+        """
+        from canslim_monitor.core.position_monitor.alert_checker_tool import AlertCheckerTool
+        from canslim_monitor.services.technical_data_service import TechnicalDataService
+
+        # Fetch technical data from Polygon (MAs, volume)
+        technical_data = {'volume_ratio': 1.0}  # Default
+        # API key can be in 'polygon.api_key' or 'market_data.api_key'
+        polygon_api_key = (
+            self.config.get('polygon', {}).get('api_key') or
+            self.config.get('market_data', {}).get('api_key')
+        )
+        if polygon_api_key:
+            try:
+                tech_service = TechnicalDataService(
+                    polygon_api_key=polygon_api_key,
+                    cache_duration_hours=4,
+                    logger=self.logger
+                )
+                technical_data = tech_service.get_technical_data(position.symbol)
+                self.logger.debug(
+                    f"Fetched MAs for {position.symbol}: "
+                    f"21={technical_data.get('ma_21')}, "
+                    f"50={technical_data.get('ma_50')}"
+                )
+            except Exception as e:
+                self.logger.warning(f"Could not fetch technical data: {e}")
+        else:
+            self.logger.debug("No Polygon API key, MA-based alerts unavailable")
+
+        # Create alert checker tool
+        checker_tool = AlertCheckerTool(
+            config=self.config,
+            logger=self.logger
+        )
+
+        # Run checks
+        alerts = checker_tool.check_position(
+            position=position,
+            current_price=current_price,
+            technical_data=technical_data,
+            market_regime=market_regime,
+        )
+
+        # Build position summary for dialog header
+        entry_price = position.avg_cost or position.pivot or current_price
+        pnl_pct = ((current_price - entry_price) / entry_price * 100) if entry_price > 0 else 0
+
+        state_name = ""
+        if position.state in STATES:
+            state_name = f"{STATES[position.state].display_name} ({position.state})"
+
+        position_summary = {
+            'current_price': current_price,
+            'entry_price': entry_price,
+            'pnl_pct': pnl_pct,
+            'state_name': state_name,
+        }
+
+        # Build check summary showing what was checked
+        check_summary = {
+            'checkers_run': ['stop', 'profit', 'pyramid', 'ma', 'health'],
+            'technical_data': technical_data,
+            'is_breakout_check': False,
+        }
+
+        return alerts, position_summary, check_summary
+
     def _trigger_transition(self, position_id: int, from_state: int, to_state: int):
         """Trigger a state transition (reuse existing drop logic)."""
         self._on_position_dropped(position_id, from_state, to_state)
@@ -1989,21 +2561,33 @@ class KanbanMainWindow(QMainWindow):
                 session.commit()
                 # Refresh display
                 self._load_positions()
-            
+
+            # Fetch fresh earnings date from API and update database
+            earnings_date = self._fetch_and_update_earnings_date(position.symbol, session, repos)
+            # Fall back to database value if API didn't find anything
+            if earnings_date is None:
+                earnings_date = position.earnings_date
+
             # Show in a dialog
             from PyQt6.QtWidgets import QTextEdit
-            
+            from datetime import date as date_type
+
             dialog = QDialog(self)
             dialog.setWindowTitle(f"Score Details: {position.symbol}")
             dialog.setMinimumSize(720, 750)  # Wider and taller for better readability
-            
+
             layout = QVBoxLayout(dialog)
-            
+
             # Header with symbol and grade (no /100 notation)
             header = QLabel(f"<h2>{position.symbol} - Grade: {grade} (Score: {score})</h2>")
             header.setStyleSheet("color: #333;")
             layout.addWidget(header)
-            
+
+            # Earnings warning section (uses freshly fetched or database earnings_date)
+            earnings_warning = self._create_earnings_warning_label(position.symbol, earnings_date)
+            if earnings_warning:
+                layout.addWidget(earnings_warning)
+
             # Score details in monospace text
             text_edit = QTextEdit()
             text_edit.setReadOnly(True)
@@ -2040,7 +2624,160 @@ class KanbanMainWindow(QMainWindow):
             
         finally:
             session.close()
-    
+
+    def _create_earnings_warning_label(self, symbol: str, earnings_date) -> QLabel:
+        """
+        Create earnings warning label with progressive color coding.
+
+        Args:
+            symbol: Stock symbol
+            earnings_date: Earnings date (date object or None)
+
+        Returns:
+            QLabel with appropriate styling, or None if no warning needed
+        """
+        from datetime import date as date_type
+
+        # Get thresholds from config
+        earnings_config = self.config.get('earnings', {})
+        thresholds = earnings_config.get('warning_thresholds', {})
+        critical_days = thresholds.get('critical', 5)
+        caution_days = thresholds.get('caution', 10)
+
+        label = QLabel()
+        label.setWordWrap(True)
+
+        if earnings_date:
+            today = date_type.today()
+            days_until = (earnings_date - today).days
+
+            if days_until < 0:
+                # Earnings already passed - might be stale data
+                label.setText(
+                    f"⚠️ Earnings date ({earnings_date}) appears to be in the past. Data may be stale."
+                )
+                label.setStyleSheet("""
+                    QLabel {
+                        color: #856404;
+                        background-color: #FFF3CD;
+                        padding: 8px;
+                        border-radius: 4px;
+                        font-weight: bold;
+                    }
+                """)
+
+            elif days_until <= critical_days:
+                # CRITICAL - Big red warning
+                label.setText(
+                    f"⚠️ EARNINGS IN {days_until} DAY{'S' if days_until != 1 else ''} "
+                    f"({earnings_date.strftime('%b %d')}) - HIGH RISK!"
+                )
+                label.setStyleSheet("""
+                    QLabel {
+                        color: white;
+                        background-color: #DC3545;
+                        padding: 10px;
+                        border-radius: 4px;
+                        font-weight: bold;
+                        font-size: 13px;
+                    }
+                """)
+
+            elif days_until <= caution_days:
+                # CAUTION - Yellow warning
+                label.setText(
+                    f"⚠️ Earnings in {days_until} days ({earnings_date.strftime('%b %d')}) - "
+                    f"Monitor closely."
+                )
+                label.setStyleSheet("""
+                    QLabel {
+                        color: #856404;
+                        background-color: #FFC107;
+                        padding: 8px;
+                        border-radius: 4px;
+                        font-weight: bold;
+                    }
+                """)
+
+            else:
+                # Safe - show info in green
+                label.setText(
+                    f"📅 Next earnings: {earnings_date.strftime('%b %d, %Y')} ({days_until} days)"
+                )
+                label.setStyleSheet("""
+                    QLabel {
+                        color: #155724;
+                        background-color: #D4EDDA;
+                        padding: 6px;
+                        border-radius: 4px;
+                    }
+                """)
+
+            return label
+
+        else:
+            # No earnings date - warn user
+            label.setText(
+                f"⚠️ No earnings date for {symbol}. Check MarketSurge or enter manually."
+            )
+            label.setStyleSheet("""
+                QLabel {
+                    color: #856404;
+                    background-color: #FFF3CD;
+                    padding: 8px;
+                    border-radius: 4px;
+                    font-style: italic;
+                }
+            """)
+            return label
+
+    def _fetch_and_update_earnings_date(self, symbol: str, session, repos):
+        """
+        Fetch earnings date from API and update database if found.
+
+        Args:
+            symbol: Stock symbol
+            session: Database session
+            repos: RepositoryManager instance
+
+        Returns:
+            Earnings date if found, None otherwise
+        """
+        try:
+            from canslim_monitor.integrations.polygon_client import PolygonClient
+
+            # Get API config
+            market_data_config = self.config.get('market_data', {})
+            polygon_config = self.config.get('polygon', {})
+
+            api_key = market_data_config.get('api_key') or polygon_config.get('api_key', '')
+            base_url = market_data_config.get('base_url') or polygon_config.get('base_url', 'https://api.polygon.io')
+
+            if not api_key:
+                self.logger.debug("No API key for earnings lookup")
+                return None
+
+            # Fetch earnings date (tries Polygon, then Yahoo Finance)
+            polygon_client = PolygonClient(api_key=api_key, base_url=base_url)
+            earnings_date = polygon_client.get_next_earnings_date(symbol)
+
+            if earnings_date:
+                self.logger.info(f"{symbol}: Fetched earnings date {earnings_date}")
+
+                # Update position in database
+                position = repos.positions.get_by_symbol(symbol)
+                if position and position.earnings_date != earnings_date:
+                    repos.positions.update(position, earnings_date=earnings_date)
+                    session.commit()
+                    self.logger.info(f"{symbol}: Updated earnings date in database")
+
+                return earnings_date
+
+        except Exception as e:
+            self.logger.warning(f"Error fetching earnings date for {symbol}: {e}")
+
+        return None
+
     def _recalculate_score(self, position_id: int, parent_dialog: QDialog = None):
         """Recalculate and update the score for a position with full data refresh.
         
@@ -2273,7 +3010,17 @@ class KanbanMainWindow(QMainWindow):
                     # Step 3: Calculate execution feasibility
                     log("")
                     log("--- Calculating Execution Feasibility ---")
-                    
+
+                    # Log IBKR connection state for debugging
+                    log(f"  IBKR connected: {self.ibkr_connected}")
+                    log(f"  IBKR client: {'available' if self.ibkr_client else 'not available'}")
+                    if self.ibkr_client:
+                        try:
+                            is_conn = self.ibkr_client.is_connected()
+                            log(f"  IBKR client.is_connected(): {is_conn}")
+                        except Exception as e:
+                            log(f"  IBKR client.is_connected() error: {e}")
+
                     exec_data = self._calculate_execution_feasibility(
                         symbol, position, state['grade'], state['adv_50day']
                     )
@@ -2296,12 +3043,16 @@ class KanbanMainWindow(QMainWindow):
                             ask = exec_data.get('ask', 0)
                             spread_pct = exec_data.get('spread_pct', 0)
                             log(f"  Bid/Ask: ${bid:.2f} / ${ask:.2f}")
-                            log(f"  Spread: {spread_pct:.3f}%")
+                            log(f"  Spread: {spread_pct:.3f}% ({exec_data.get('spread_status', 'N/A')})")
                         else:
-                            if self.ibkr_connected:
-                                log("  Spread: Could not fetch bid/ask")
+                            if not self.ibkr_connected:
+                                log("  Spread: N/A (GUI IBKR service not started)")
+                                log("    → Start via: Service > Start Service")
+                            elif not self.ibkr_client:
+                                log("  Spread: N/A (IBKR client not initialized)")
                             else:
-                                log("  Spread: N/A (IBKR not connected)")
+                                log("  Spread: Could not fetch bid/ask from IBKR")
+                                log("    → Check logs for details")
                     else:
                         log("⚠  Execution feasibility: N/A (no ADV data)")
                     
@@ -2421,29 +3172,51 @@ class KanbanMainWindow(QMainWindow):
         spread_status = None
         bid_price = None
         ask_price = None
-        
+
+        # Debug logging for IBKR connection state
+        self.logger.debug(f"Spread fetch for {symbol}: ibkr_connected={self.ibkr_connected}, "
+                         f"ibkr_client={'exists' if self.ibkr_client else 'None'}")
+
         if self.ibkr_connected and self.ibkr_client:
             try:
-                # Fetch quote for this symbol
-                quotes = self.ibkr_client.get_quotes([symbol])
-                if quotes and symbol in quotes:
-                    quote_data = quotes[symbol]
-                    bid_price = quote_data.get('bid')
-                    ask_price = quote_data.get('ask')
-                    
-                    if bid_price and ask_price and bid_price > 0:
-                        spread_pct = ((ask_price - bid_price) / bid_price) * 100
-                        spread_available = True
-                        
-                        # Classify spread status for scoring.py display
-                        if spread_pct <= 0.10:
-                            spread_status = "TIGHT"
-                        elif spread_pct <= 0.30:
-                            spread_status = "NORMAL"
+                # Verify client is still connected
+                client_connected = self.ibkr_client.is_connected()
+                self.logger.debug(f"IBKR client.is_connected() = {client_connected}")
+
+                if not client_connected:
+                    self.logger.warning(f"IBKR client reports disconnected - cannot fetch spread for {symbol}")
+                else:
+                    # Fetch quote for this symbol
+                    self.logger.debug(f"Fetching quote for {symbol}...")
+                    quotes = self.ibkr_client.get_quotes([symbol])
+                    self.logger.debug(f"Quote response for {symbol}: {quotes}")
+
+                    if quotes and symbol in quotes:
+                        quote_data = quotes[symbol]
+                        bid_price = quote_data.get('bid')
+                        ask_price = quote_data.get('ask')
+                        self.logger.debug(f"{symbol} bid={bid_price}, ask={ask_price}")
+
+                        if bid_price and ask_price and bid_price > 0:
+                            spread_pct = ((ask_price - bid_price) / bid_price) * 100
+                            spread_available = True
+
+                            # Classify spread status for scoring.py display
+                            if spread_pct <= 0.10:
+                                spread_status = "TIGHT"
+                            elif spread_pct <= 0.30:
+                                spread_status = "NORMAL"
+                            else:
+                                spread_status = "WIDE"
+                            self.logger.debug(f"{symbol} spread_pct={spread_pct:.4f}%, status={spread_status}")
                         else:
-                            spread_status = "WIDE"
+                            self.logger.debug(f"{symbol}: bid/ask invalid or zero (bid={bid_price}, ask={ask_price})")
+                    else:
+                        self.logger.warning(f"No quote data returned for {symbol}")
             except Exception as e:
-                self.logger.warning(f"Could not fetch bid/ask for {symbol}: {e}")
+                self.logger.warning(f"Could not fetch bid/ask for {symbol}: {e}", exc_info=True)
+        else:
+            self.logger.debug(f"Skipping spread fetch - IBKR not available (connected={self.ibkr_connected}, client={self.ibkr_client is not None})")
         
         # Overall execution risk
         if adv_status == "FAIL":
@@ -2766,15 +3539,50 @@ class KanbanMainWindow(QMainWindow):
         """Handle add button click."""
         # Create modeless dialog with no parent - truly independent window
         self._add_dialog = AddPositionDialog(None)  # None parent = independent window
-        
+
         # Connect accepted signal to handler
         self._add_dialog.accepted.connect(self._on_add_dialog_accepted)
-        
+
         # Show as modeless (non-blocking)
         self._add_dialog.show()
         self._add_dialog.raise_()
         self._add_dialog.activateWindow()
-    
+
+    def _on_score_symbol(self):
+        """Open Score Preview dialog to preview a symbol's entry grade."""
+        from .dialogs.score_preview_dialog import ScorePreviewDialog
+
+        # Create modeless dialog with config, db access, and IBKR client for dynamic scoring
+        self._score_dialog = ScorePreviewDialog(
+            None,
+            config=self.config,
+            db_session_factory=self.db.get_new_session,
+            ibkr_client=self.ibkr_client,
+            ibkr_connected=self.ibkr_connected
+        )
+        self._score_dialog.accepted.connect(self._on_score_dialog_accepted)
+
+        # Show as modeless (non-blocking)
+        self._score_dialog.show()
+        self._score_dialog.raise_()
+        self._score_dialog.activateWindow()
+
+    def _on_score_dialog_accepted(self):
+        """Handle ScorePreviewDialog accepted - open AddPositionDialog with data."""
+        if not hasattr(self, '_score_dialog') or not self._score_dialog:
+            return
+
+        # Get pre-populate data from score preview
+        prepopulate_data = self._score_dialog.get_prepopulate_data()
+        self._score_dialog = None
+
+        # Open AddPositionDialog with pre-populated scoring fields
+        self._add_dialog = AddPositionDialog(None, initial_data=prepopulate_data)
+        self._add_dialog.accepted.connect(self._on_add_dialog_accepted)
+        self._add_dialog.show()
+        self._add_dialog.raise_()
+        self._add_dialog.activateWindow()
+
     def _on_add_dialog_accepted(self):
         """Handle AddPositionDialog accepted."""
         import json
@@ -2902,14 +3710,21 @@ class KanbanMainWindow(QMainWindow):
                 self.ibkr_connected = True
                 self.service_panel.set_running(True, "IBKR connected")
                 self.status_bar.showMessage("Connected to IBKR TWS - fetching prices...")
-                
+
                 # Do initial price update
                 self._update_prices()
-                
-                # Start timer for continuous updates
+
+                # Do initial futures update
+                self._update_futures()
+
+                # Refresh index stats (SMAs) from Polygon in background
+                self._load_index_stats()
+
+                # Start timers for continuous updates
                 self.price_timer.start(self.price_update_interval)
-                
-                self.logger.info(f"IBKR service started (refresh every {self.price_update_interval/1000}s)")
+                self.futures_timer.start(self.futures_update_interval)
+
+                self.logger.info(f"IBKR service started (prices: {self.price_update_interval/1000}s, futures: {self.futures_update_interval/1000}s)")
             else:
                 self.ibkr_connected = False
                 self.service_panel.set_running(False)
@@ -2937,9 +3752,10 @@ class KanbanMainWindow(QMainWindow):
     def _on_stop_service(self):
         """Stop the monitoring service and disconnect from IBKR."""
         self.logger.info("Stopping service...")
-        
-        # Stop price timer first (prevents new updates from starting)
+
+        # Stop timers first (prevents new updates from starting)
         self.price_timer.stop()
+        self.futures_timer.stop()
         
         # Wait briefly for any in-progress price update, but don't block forever
         if self.price_thread is not None and self.price_thread.isRunning():
@@ -3043,18 +3859,20 @@ class KanbanMainWindow(QMainWindow):
             QApplication.processEvents()
             self.logger.info("Importing regime components...")
             
-            # Import regime components
+            # Import regime components (same imports as CLI test_regime_alert.py)
             from canslim_monitor.regime.historical_data import fetch_spy_qqq_daily, fetch_index_daily
             from canslim_monitor.regime.distribution_tracker import DistributionDayTracker
             from canslim_monitor.regime.ftd_tracker import (
                 FollowThroughDayTracker, RallyAttempt, FollowThroughDay, MarketStatus
             )
             from canslim_monitor.regime.market_regime import (
-                MarketRegimeCalculator, DistributionData, FTDData, create_overnight_data
+                MarketRegimeCalculator, DistributionData, FTDData, create_overnight_data,
+                calculate_entry_risk_score, OvernightData, RegimeScore
             )
+            from canslim_monitor.regime.market_phase_manager import MarketPhaseManager
             from canslim_monitor.regime.models_regime import (
                 Base, DistributionDay, DistributionDayCount, DistributionDayOverride,
-                OvernightTrend, MarketRegimeAlert, DDayTrend
+                OvernightTrend, MarketRegimeAlert, DDayTrend, TrendType
             )
             
             dialog.set_progress(15, "Ensuring database tables exist...")
@@ -3063,16 +3881,11 @@ class KanbanMainWindow(QMainWindow):
             # Ensure regime tables exist in main database
             self._ensure_regime_tables()
             self.logger.info("Database tables ensured")
-            
-            # Use in-memory session for intermediate tracking calculations
-            from sqlalchemy import create_engine
-            from sqlalchemy.orm import sessionmaker
-            
-            temp_engine = create_engine('sqlite:///:memory:')
-            Base.metadata.create_all(temp_engine)
-            TempSession = sessionmaker(bind=temp_engine)
-            temp_session = TempSession()
-            self.logger.info("Temp session created")
+
+            # Use main database session for all trackers (same as CLI)
+            # This ensures access to historical data, overrides, and phase history
+            regime_session = self.db.get_new_session()
+            self.logger.info("Using main database session for regime analysis")
             
             dialog.set_progress(25, "Fetching index data from Polygon...")
             QApplication.processEvents()
@@ -3082,7 +3895,7 @@ class KanbanMainWindow(QMainWindow):
             api_config = {'polygon': {'api_key': polygon_key}}
             data = fetch_index_daily(
                 symbols=['SPY', 'QQQ', 'DIA', 'IWM'],
-                lookback_days=250,  # Need 200+ for 200-day SMA
+                lookback_days=300,  # Need 300 calendar days to get 200+ trading days for SMA
                 config=api_config,
                 use_indices=False
             )
@@ -3121,9 +3934,19 @@ class KanbanMainWindow(QMainWindow):
             dialog.set_progress(50, "Calculating distribution days...")
             QApplication.processEvents()
             self.logger.info("Calculating distribution days...")
-            
-            # Calculate distribution days
-            dist_tracker = DistributionDayTracker(db_session=temp_session)
+
+            # Get config parameters (same as CLI)
+            dist_config = config.get('distribution_days', {})
+            use_indices = config.get('market_regime', {}).get('use_indices', False)
+
+            # Calculate distribution days with config params
+            dist_tracker = DistributionDayTracker(
+                db_session=regime_session,
+                decline_threshold=dist_config.get('decline_threshold'),
+                lookback_days=dist_config.get('lookback_days', 25),
+                rally_expiration_pct=dist_config.get('rally_expiration_pct', 5.0),
+                use_indices=use_indices
+            )
             combined = dist_tracker.get_combined_data(spy_bars, qqq_bars)
             self.logger.info(f"Distribution days - SPY: {combined.spy_count}, QQQ: {combined.qqq_count}")
             
@@ -3133,9 +3956,13 @@ class KanbanMainWindow(QMainWindow):
             dialog.set_progress(65, "Checking Follow-Through Day status...")
             QApplication.processEvents()
             self.logger.info("Checking FTD status...")
-            
-            # Check FTD status
-            ftd_tracker = FollowThroughDayTracker(db_session=temp_session)
+
+            # Check FTD status with config params (same as CLI)
+            ftd_tracker = FollowThroughDayTracker(
+                db_session=regime_session,
+                ftd_min_gain=config.get('ftd_min_gain', 1.25),
+                ftd_earliest_day=config.get('ftd_earliest_day', 4)
+            )
             ftd_status = ftd_tracker.get_market_phase_status(
                 spy_bars, qqq_bars,
                 spy_d_count=combined.spy_count,
@@ -3171,13 +3998,35 @@ class KanbanMainWindow(QMainWindow):
                 successful_ftd_count=rally_histogram.success_count
             )
             
+            # Check phase transitions (same as CLI)
+            dialog.set_progress(75, "Checking phase transitions...")
+            QApplication.processEvents()
+            self.logger.info("Checking phase transitions...")
+
+            phase_config = config.get('market_phase', {})
+            phase_manager = MarketPhaseManager(
+                db_session=regime_session,
+                thresholds={
+                    'pressure_min_ddays': phase_config.get('pressure_threshold', 5),
+                    'correction_min_ddays': phase_config.get('correction_threshold', 7),
+                    'confirmed_max_ddays': phase_config.get('confirmed_max_ddays', 4),
+                }
+            )
+
+            phase_transition = phase_manager.update_phase(
+                dist_data=combined,
+                ftd_data=ftd_status
+            )
+
+            if phase_transition.phase_changed:
+                self.logger.info(f"PHASE CHANGE: {phase_transition.previous_phase.value} -> {phase_transition.current_phase.value}")
+                self.logger.info(f"Reason: {phase_transition.trigger_reason}")
+
             dialog.set_progress(80, "Calculating composite regime score...")
             QApplication.processEvents()
             self.logger.info("Calculating regime score...")
-            
-            # Calculate regime
-            calculator = MarketRegimeCalculator(config.get('market_regime', {}))
-            
+
+            # Build distribution data for calculator
             dist_data = DistributionData(
                 spy_count=combined.spy_count,
                 qqq_count=combined.qqq_count,
@@ -3187,11 +4036,54 @@ class KanbanMainWindow(QMainWindow):
                 spy_dates=combined.spy_dates,
                 qqq_dates=combined.qqq_dates
             )
-            
-            overnight = create_overnight_data(0.0, 0.0, 0.0)  # No IBKR data
-            
-            score = calculator.calculate_regime(dist_data, overnight, None, ftd_data=ftd_data)
-            self.logger.info(f"Regime calculated: {score.regime.value}, score: {score.composite_score}")
+
+            overnight = create_overnight_data(0.0, 0.0, 0.0)  # No IBKR data in GUI
+
+            # Load prior score for trend tracking (same as CLI)
+            prior_score = None
+            try:
+                prior = regime_session.query(MarketRegimeAlert).filter(
+                    MarketRegimeAlert.date < date.today()
+                ).order_by(MarketRegimeAlert.date.desc()).first()
+
+                if prior:
+                    prior_dist = DistributionData(
+                        spy_count=prior.spy_d_count,
+                        qqq_count=prior.qqq_d_count,
+                        spy_5day_delta=prior.spy_5day_delta or 0,
+                        qqq_5day_delta=prior.qqq_5day_delta or 0,
+                        trend=prior.d_day_trend or DDayTrend.STABLE
+                    )
+                    prior_overnight = OvernightData(
+                        es_change_pct=0, es_trend=TrendType.NEUTRAL,
+                        nq_change_pct=0, nq_trend=TrendType.NEUTRAL,
+                        ym_change_pct=0, ym_trend=TrendType.NEUTRAL
+                    )
+                    prior_score = RegimeScore(
+                        composite_score=prior.composite_score,
+                        regime=prior.regime,
+                        distribution_data=prior_dist,
+                        overnight_data=prior_overnight,
+                        component_scores={},
+                        timestamp=datetime.combine(prior.date, datetime.min.time())
+                    )
+                    self.logger.info(f"Loaded prior score: {prior.regime.value} ({prior.composite_score:+.2f})")
+            except Exception as e:
+                self.logger.warning(f"Could not load prior regime: {e}")
+
+            # Calculate regime with prior score for trend tracking
+            calculator = MarketRegimeCalculator(config.get('market_regime', {}))
+            score = calculator.calculate_regime(dist_data, overnight, prior_score, ftd_data=ftd_data)
+
+            # Calculate entry risk (same as CLI)
+            entry_risk_score_val, entry_risk_level_val = calculate_entry_risk_score(
+                overnight, dist_data, ftd_data
+            )
+            score.entry_risk_score = entry_risk_score_val
+            score.entry_risk_level = entry_risk_level_val
+
+            self.logger.info(f"Regime calculated: {score.regime.value}, score: {score.composite_score:+.2f}")
+            self.logger.info(f"Entry risk: {entry_risk_level_val.value} ({entry_risk_score_val:+.2f})")
             
             min_exp, max_exp = calculator.get_exposure_percentage(score.regime, dist_data.total_count)
             self.logger.info(f"Exposure: {min_exp}-{max_exp}%")
@@ -3247,6 +4139,23 @@ class KanbanMainWindow(QMainWindow):
                         dia_stats = self._calculate_index_stats(dia_bars) if dia_bars else {}
                         iwm_stats = self._calculate_index_stats(iwm_bars) if iwm_bars else {}
 
+                        # Get entry risk from score
+                        _entry_risk_level = None
+                        _entry_risk_score = 0.0
+                        if hasattr(score, 'entry_risk_level') and score.entry_risk_level:
+                            _entry_risk_level = score.entry_risk_level.value if hasattr(score.entry_risk_level, 'value') else str(score.entry_risk_level)
+                            _entry_risk_score = score.entry_risk_score or 0.0
+
+                        # Try to get IBD status
+                        _ibd_status = None
+                        try:
+                            from sqlalchemy import text
+                            ibd_result = main_session.execute(text("SELECT status FROM ibd_exposure_current WHERE id=1")).fetchone()
+                            if ibd_result:
+                                _ibd_status = ibd_result[0]
+                        except Exception:
+                            pass
+
                         # Build results dict (same format as normal flow)
                         results = {
                             'date': today.strftime("%A, %B %d, %Y"),
@@ -3269,13 +4178,16 @@ class KanbanMainWindow(QMainWindow):
                             'qqq_stats': qqq_stats,
                             'dia_stats': dia_stats,
                             'iwm_stats': iwm_stats,
+                            'entry_risk_level': _entry_risk_level,
+                            'entry_risk_score': _entry_risk_score,
+                            'ibd_status': _ibd_status,
                             'not_saved': True,  # Flag to indicate this wasn't saved
                         }
 
                         # Show results in dialog without saving
                         dialog.show_results(results)
                         main_session.close()
-                        temp_session.close()
+                        regime_session.close()
                         dialog.exec()
                         return
 
@@ -3407,6 +4319,23 @@ class KanbanMainWindow(QMainWindow):
                 }
             
             # Build results dictionary for dialog
+            # Get entry risk level/score from score object
+            entry_risk_level = None
+            entry_risk_score = 0.0
+            if hasattr(score, 'entry_risk_level') and score.entry_risk_level:
+                entry_risk_level = score.entry_risk_level.value if hasattr(score.entry_risk_level, 'value') else str(score.entry_risk_level)
+                entry_risk_score = score.entry_risk_score or 0.0
+
+            # Try to get IBD status from database
+            ibd_status = None
+            try:
+                from sqlalchemy import text
+                ibd_result = main_session.execute(text("SELECT status FROM ibd_exposure_current WHERE id=1")).fetchone()
+                if ibd_result:
+                    ibd_status = ibd_result[0]
+            except Exception:
+                pass  # Table may not exist
+
             results = {
                 'date': today.strftime("%A, %B %d, %Y"),
                 'spy_count': combined.spy_count,
@@ -3428,6 +4357,10 @@ class KanbanMainWindow(QMainWindow):
                 'qqq_stats': qqq_stats,
                 'dia_stats': dia_stats,
                 'iwm_stats': iwm_stats,
+                # New fields for updated dialog format
+                'entry_risk_level': entry_risk_level,
+                'entry_risk_score': entry_risk_score,
+                'ibd_status': ibd_status,
             }
             
             self.logger.info(f"Results built: {results['regime']}, SPY={results['spy_count']}, QQQ={results['qqq_count']}")
@@ -3446,15 +4379,364 @@ class KanbanMainWindow(QMainWindow):
                 f"Market regime analysis complete: {score.regime.value}, "
                 f"SPY={combined.spy_count}, QQQ={combined.qqq_count}"
             )
-            
+
         except Exception as e:
             self.logger.error(f"Market regime analysis failed: {e}", exc_info=True)
             dialog.show_error(str(e))
             self.status_bar.showMessage("Market regime analysis failed")
-        
+
+        finally:
+            # Clean up regime session
+            try:
+                regime_session.close()
+            except Exception:
+                pass  # Session may not exist if error occurred early
+
         # Keep dialog open for user to review
         dialog.exec()
-    
+
+    def _on_update_all_earnings(self):
+        """Update earnings dates for all active (non-closed) positions."""
+        from PyQt6.QtWidgets import QProgressDialog, QMessageBox
+        from PyQt6.QtCore import Qt
+
+        self.logger.info("Starting earnings date update for all active positions")
+
+        # Load config for API key
+        import yaml
+
+        config = getattr(self, 'config', {}) or {}
+        if not config:
+            config_paths = [
+                'user_config.yaml',
+                'canslim_monitor/user_config.yaml',
+            ]
+            for path in config_paths:
+                if os.path.exists(path):
+                    with open(path, 'r') as f:
+                        config = yaml.safe_load(f) or {}
+                    break
+
+        api_key = (
+            config.get('market_data', {}).get('api_key') or
+            config.get('polygon', {}).get('api_key')
+        )
+        base_url = (
+            config.get('market_data', {}).get('base_url') or
+            'https://api.polygon.io'
+        )
+
+        if not api_key:
+            QMessageBox.warning(
+                self,
+                "No API Key",
+                "No Polygon/Massive API key found in config.\n\n"
+                "Add to your config:\n"
+                "  market_data:\n"
+                "    api_key: 'your-api-key'"
+            )
+            return
+
+        # Create progress dialog
+        progress = QProgressDialog("Updating earnings dates...", "Cancel", 0, 100, self)
+        progress.setWindowTitle("Update Earnings Dates")
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.setValue(5)
+        QApplication.processEvents()
+
+        try:
+            # Import and create service
+            from canslim_monitor.integrations.polygon_client import PolygonClient
+            from canslim_monitor.services.earnings_service import EarningsService
+
+            progress.setLabelText("Creating API client...")
+            progress.setValue(10)
+            QApplication.processEvents()
+
+            polygon_client = PolygonClient(api_key=api_key, base_url=base_url)
+
+            earnings_service = EarningsService(
+                session_factory=self.db.get_new_session,
+                polygon_client=polygon_client
+            )
+
+            # Get active symbols
+            progress.setLabelText("Getting active symbols...")
+            progress.setValue(15)
+            QApplication.processEvents()
+
+            symbols = earnings_service.get_active_symbols()
+
+            if not symbols:
+                progress.close()
+                QMessageBox.information(
+                    self,
+                    "No Positions",
+                    "No active positions found to update."
+                )
+                return
+
+            progress.setMaximum(len(symbols) + 10)
+            progress.setValue(10)
+
+            results = {
+                'updated': 0,
+                'skipped': 0,
+                'not_found': 0,
+                'errors': 0,
+                'details': []
+            }
+
+            from datetime import date as date_type
+
+            for i, symbol in enumerate(symbols):
+                if progress.wasCanceled():
+                    break
+
+                progress.setLabelText(f"Checking {symbol}... ({i+1}/{len(symbols)})")
+                progress.setValue(10 + i)
+                QApplication.processEvents()
+
+                try:
+                    # Check if already has future earnings date
+                    session = self.db.get_new_session()
+                    try:
+                        from canslim_monitor.data.models import Position
+                        position = session.query(Position).filter(
+                            Position.symbol == symbol,
+                            Position.state >= 0
+                        ).first()
+
+                        if position and position.earnings_date and position.earnings_date >= date_type.today():
+                            results['skipped'] += 1
+                            results['details'].append(f"{symbol}: Skipped (has {position.earnings_date})")
+                            continue
+                    finally:
+                        session.close()
+
+                    # Fetch earnings date
+                    earnings_date = polygon_client.get_next_earnings_date(symbol)
+
+                    if earnings_date:
+                        if earnings_service.update_earnings_date(symbol, earnings_date):
+                            results['updated'] += 1
+                            results['details'].append(f"{symbol}: Updated to {earnings_date}")
+                        else:
+                            results['errors'] += 1
+                            results['details'].append(f"{symbol}: Update failed")
+                    else:
+                        results['not_found'] += 1
+                        results['details'].append(f"{symbol}: No earnings date found")
+
+                except Exception as e:
+                    self.logger.error(f"Error fetching earnings for {symbol}: {e}")
+                    results['errors'] += 1
+                    results['details'].append(f"{symbol}: Error - {e}")
+
+            progress.close()
+
+            # Refresh UI
+            self._load_positions()
+
+            # Show summary
+            summary = (
+                f"Earnings Update Complete\n\n"
+                f"Symbols checked: {len(symbols)}\n"
+                f"Updated: {results['updated']}\n"
+                f"Skipped (already set): {results['skipped']}\n"
+                f"Not found: {results['not_found']}\n"
+                f"Errors: {results['errors']}"
+            )
+
+            if results['details'] and len(results['details']) <= 20:
+                summary += "\n\nDetails:\n" + "\n".join(results['details'][:20])
+            elif results['details']:
+                summary += f"\n\n(Showing first 20 of {len(results['details'])} results)\n"
+                summary += "\n".join(results['details'][:20])
+
+            QMessageBox.information(self, "Earnings Update", summary)
+
+            self.logger.info(
+                f"Earnings update complete: {results['updated']} updated, "
+                f"{results['skipped']} skipped, {results['not_found']} not found, "
+                f"{results['errors']} errors"
+            )
+
+        except Exception as e:
+            progress.close()
+            self.logger.error(f"Earnings update failed: {e}", exc_info=True)
+            QMessageBox.critical(
+                self,
+                "Error",
+                f"Failed to update earnings dates:\n\n{e}"
+            )
+
+    def _on_seed_volume_data(self):
+        """Seed 50-day volume data for all active (non-closed) positions."""
+        from PyQt6.QtWidgets import QProgressDialog, QMessageBox
+        from PyQt6.QtCore import Qt
+
+        self.logger.info("Starting 50-day volume data seeding for all active positions")
+
+        # Load config for API key
+        import yaml
+
+        config = getattr(self, 'config', {}) or {}
+        if not config:
+            config_paths = [
+                'user_config.yaml',
+                'canslim_monitor/user_config.yaml',
+            ]
+            for path in config_paths:
+                if os.path.exists(path):
+                    with open(path, 'r') as f:
+                        config = yaml.safe_load(f) or {}
+                    break
+
+        api_key = (
+            config.get('market_data', {}).get('api_key') or
+            config.get('polygon', {}).get('api_key')
+        )
+        base_url = (
+            config.get('market_data', {}).get('base_url') or
+            'https://api.polygon.io'
+        )
+        # Use faster rate limit for paid tiers
+        rate_limit_delay = config.get('market_data', {}).get('rate_limit_delay', 0.1)
+
+        if not api_key:
+            QMessageBox.warning(
+                self,
+                "No API Key",
+                "No Polygon/Massive API key found in config.\n\n"
+                "Add to your config:\n"
+                "  market_data:\n"
+                "    api_key: 'your-api-key'"
+            )
+            return
+
+        # Create progress dialog
+        progress = QProgressDialog("Seeding volume data...", "Cancel", 0, 100, self)
+        progress.setWindowTitle("Seed 50-Day Volume Data")
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.setValue(5)
+        QApplication.processEvents()
+
+        try:
+            # Import and create service
+            from canslim_monitor.integrations.polygon_client import PolygonClient
+            from canslim_monitor.services.volume_service import VolumeService
+
+            progress.setLabelText("Creating API client...")
+            progress.setValue(10)
+            QApplication.processEvents()
+
+            polygon_client = PolygonClient(
+                api_key=api_key,
+                base_url=base_url,
+                rate_limit_delay=rate_limit_delay
+            )
+
+            volume_service = VolumeService(
+                db_session_factory=self.db.get_new_session,
+                polygon_client=polygon_client
+            )
+
+            # Get active symbols (state >= 0 means not closed)
+            progress.setLabelText("Getting active symbols...")
+            progress.setValue(15)
+            QApplication.processEvents()
+
+            session = self.db.get_new_session()
+            try:
+                from canslim_monitor.data.models import Position
+                symbols = session.query(Position.symbol).filter(
+                    Position.state >= 0
+                ).distinct().all()
+                symbols = [s[0] for s in symbols]
+            finally:
+                session.close()
+
+            if not symbols:
+                progress.close()
+                QMessageBox.information(
+                    self,
+                    "No Positions",
+                    "No active positions found to update."
+                )
+                return
+
+            progress.setMaximum(len(symbols) + 15)
+            progress.setValue(15)
+
+            results = {
+                'success': 0,
+                'failed': 0,
+                'details': []
+            }
+
+            for i, symbol in enumerate(symbols):
+                if progress.wasCanceled():
+                    break
+
+                progress.setLabelText(f"Fetching {symbol}... ({i+1}/{len(symbols)})")
+                progress.setValue(15 + i)
+                QApplication.processEvents()
+
+                try:
+                    result = volume_service.update_symbol(symbol, days=50)
+
+                    if result.success:
+                        results['success'] += 1
+                        results['details'].append(
+                            f"{symbol}: {result.bars_fetched} bars, avg={result.avg_volume_50d:,}"
+                        )
+                    else:
+                        results['failed'] += 1
+                        results['details'].append(f"{symbol}: {result.error}")
+
+                except Exception as e:
+                    self.logger.error(f"Error seeding volume for {symbol}: {e}")
+                    results['failed'] += 1
+                    results['details'].append(f"{symbol}: Error - {e}")
+
+            progress.close()
+
+            # Refresh UI
+            self._load_positions()
+
+            # Show summary
+            summary = (
+                f"Volume Data Seeding Complete\n\n"
+                f"Symbols processed: {len(symbols)}\n"
+                f"Successful: {results['success']}\n"
+                f"Failed: {results['failed']}"
+            )
+
+            if results['details'] and len(results['details']) <= 25:
+                summary += "\n\nDetails:\n" + "\n".join(results['details'][:25])
+            elif results['details']:
+                summary += f"\n\n(Showing first 25 of {len(results['details'])} results)\n"
+                summary += "\n".join(results['details'][:25])
+
+            QMessageBox.information(self, "Volume Data Seeding", summary)
+
+            self.logger.info(
+                f"Volume seeding complete: {results['success']} successful, "
+                f"{results['failed']} failed"
+            )
+
+        except Exception as e:
+            progress.close()
+            self.logger.error(f"Volume seeding failed: {e}", exc_info=True)
+            QMessageBox.critical(
+                self,
+                "Error",
+                f"Failed to seed volume data:\n\n{e}"
+            )
+
     def _on_windows_service_state_changed(self, state: str):
         """Handle Windows service state changes from ServiceStatusBar."""
         self.logger.info(f"Windows service state changed: {state}")
@@ -3501,9 +4783,12 @@ class KanbanMainWindow(QMainWindow):
         
         # Create worker and thread for IBKR fetch (slow operation)
         self.price_update_in_progress = True
-        
+
+        # Get Polygon API key from config for fallback
+        polygon_api_key = self.config.get('market_data', {}).get('api_key') if self.config else None
+
         self.price_thread = QThread()
-        self.price_worker = PriceUpdateWorker(self.ibkr_client, symbols)
+        self.price_worker = PriceUpdateWorker(self.ibkr_client, symbols, polygon_api_key=polygon_api_key)
         self.price_worker.moveToThread(self.price_thread)
         
         # Connect signals
@@ -3520,37 +4805,69 @@ class KanbanMainWindow(QMainWindow):
     def _on_prices_received(self, prices: Dict):
         """Handle prices received from background worker."""
         self.logger.debug(f"Received prices for {len(prices)} symbols")
-        
+
         session = self.db.get_new_session()
         try:
             repos = RepositoryManager(session)
             positions = repos.positions.get_all(include_closed=False)
-            
-            # Update positions
+
+            # Build position lookup for P&L calculation
+            position_data = {}
+            for pos in positions:
+                position_data[pos.symbol] = {
+                    'avg_cost': pos.avg_cost,
+                    'state': pos.state
+                }
+
+            # Update database prices
             updated_count = 0
             for pos in positions:
                 if pos.symbol in prices:
                     price_data = prices[pos.symbol]
                     last_price = price_data.get('last') or price_data.get('close')
-                    
+
                     if last_price and last_price > 0:
                         repos.positions.update_price(pos, last_price)
                         updated_count += 1
-            
+
             session.commit()
-            
-            # Refresh the board
-            self._load_positions()
-            
+
+            # Incremental card updates (no rebuild) - much faster!
+            self._update_card_prices(prices, position_data)
+
             # Update market regime banner with index prices
             self._update_market_banner(prices)
-            
+
             self.status_bar.showMessage(f"Updated {updated_count} prices at {datetime.now().strftime('%H:%M:%S')}")
-            
+
         except Exception as e:
             self.logger.error(f"Error processing prices: {e}")
         finally:
             session.close()
+
+    def _update_card_prices(self, prices: Dict, position_data: Dict):
+        """
+        Update card prices incrementally without rebuilding the board.
+        This is much more efficient than calling _load_positions().
+        """
+        updated = 0
+        for symbol, card in self._cards_by_symbol.items():
+            if symbol in prices:
+                price_data = prices[symbol]
+                last_price = price_data.get('last') or price_data.get('close')
+
+                if last_price and last_price > 0:
+                    # Calculate P&L if in position
+                    pnl_pct = None
+                    pos_info = position_data.get(symbol, {})
+                    avg_cost = pos_info.get('avg_cost')
+                    if avg_cost and avg_cost > 0 and pos_info.get('state', 0) > 0:
+                        pnl_pct = ((last_price - avg_cost) / avg_cost) * 100
+
+                    card.update_price(last_price, pnl_pct)
+                    updated += 1
+
+        self.logger.debug(f"Incrementally updated {updated} card prices")
     
     def _on_price_error(self, error_msg: str):
         """Handle error from price update worker."""
@@ -3579,31 +4896,62 @@ class KanbanMainWindow(QMainWindow):
                 pass  # Already deleted
     
     def _update_market_banner(self, prices: Dict):
-        """Update market regime banner with index prices and day change from IBKR."""
+        """Update market regime banner with index prices and change from open/day from IBKR."""
         for symbol in ['SPY', 'QQQ', 'DIA', 'IWM']:
             price_data = prices.get(symbol, {})
             last_price = price_data.get('last') or price_data.get('close')
+
+            # Skip update if no price data - preserve existing display
+            if not last_price or last_price <= 0:
+                continue
+
             prev_close = price_data.get('close') or price_data.get('previousClose')
-            
-            # Calculate day change if we have both prices
+            open_price = price_data.get('open')
+
+            # Calculate day change (from previous close)
             day_pct = None
             if last_price and prev_close and prev_close > 0:
                 day_pct = ((last_price - prev_close) / prev_close) * 100
-            
-            # Get cached SMA/week data if available (set by regime analysis)
+
+            # Calculate change from open (includes premarket movement)
+            open_pct = None
+            if last_price and open_price and open_price > 0:
+                open_pct = ((last_price - open_price) / open_price) * 100
+
+            # Get cached SMA data if available (set by regime analysis)
             cached = getattr(self, f'_cached_{symbol.lower()}_stats', {})
-            
+
             # Update the index box
             self.regime_banner.update_index_box(
                 symbol,
                 price=last_price,
                 day_pct=day_pct,
-                week_pct=cached.get('week_pct'),
+                open_pct=open_pct,
                 sma21=cached.get('sma21'),
                 sma50=cached.get('sma50'),
                 sma200=cached.get('sma200')
             )
-    
+
+    def _update_futures(self):
+        """Fetch live futures data from IBKR and update banner."""
+        if not self.ibkr_connected or not self.ibkr_client:
+            return
+
+        try:
+            # Import the futures snapshot function
+            from canslim_monitor.regime.ibkr_futures import get_futures_snapshot
+
+            # Get futures percentages (ES, NQ, YM) - calculates change from 6 PM Globex open
+            es_pct, nq_pct, ym_pct = get_futures_snapshot(self.ibkr_client)
+
+            # Update the banner with live futures data
+            self.regime_banner.update_futures(es_pct=es_pct, nq_pct=nq_pct, ym_pct=ym_pct)
+
+            self.logger.debug(f"Futures update: ES={es_pct:+.2f}%, NQ={nq_pct:+.2f}%, YM={ym_pct:+.2f}%")
+
+        except Exception as e:
+            self.logger.warning(f"Futures update error: {e}")
+
     def _on_import(self):
         """Import from Excel."""
         from PyQt6.QtWidgets import QFileDialog

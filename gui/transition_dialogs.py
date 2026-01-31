@@ -491,12 +491,19 @@ class AddPositionDialog(QDialog):
     """
     Dialog for adding a new position to the watchlist.
     Modeless dialog - can be used independently of main window.
+
+    Args:
+        parent: Parent widget
+        initial_data: Optional dict to pre-populate form fields.
+            Supported keys: symbol, pattern, base_stage, base_depth,
+            base_length, rs_rating
     """
-    
-    def __init__(self, parent=None):
+
+    def __init__(self, parent=None, initial_data: Dict[str, Any] = None):
         super().__init__(parent)
         self.result_data: Dict[str, Any] = {}
-        
+        self.initial_data = initial_data or {}
+
         # Make dialog independent (modeless) - can minimize main window while this stays open
         self.setWindowFlags(
             Qt.WindowType.Window |
@@ -504,8 +511,9 @@ class AddPositionDialog(QDialog):
             Qt.WindowType.WindowMinimizeButtonHint
         )
         self.setWindowModality(Qt.WindowModality.NonModal)
-        
+
         self._setup_ui()
+        self._populate_initial_data()
     
     def _setup_ui(self):
         """Set up the dialog UI."""
@@ -885,7 +893,59 @@ class AddPositionDialog(QDialog):
         self.symbol_input.setText(text.upper())
         self.symbol_input.setCursorPosition(cursor_pos)
         self.symbol_input.blockSignals(False)
-    
+
+    def _populate_initial_data(self):
+        """
+        Populate form fields from initial_data if provided.
+
+        Used when opening dialog from Score Preview with pre-calculated values.
+        """
+        if not self.initial_data:
+            return
+
+        # Symbol
+        if 'symbol' in self.initial_data:
+            self.symbol_input.setText(str(self.initial_data['symbol']).upper())
+
+        # Pattern - try to find in combo, otherwise set as text
+        if 'pattern' in self.initial_data:
+            pattern = str(self.initial_data['pattern'])
+            idx = self.pattern_combo.findText(pattern, Qt.MatchFlag.MatchFixedString)
+            if idx >= 0:
+                self.pattern_combo.setCurrentIndex(idx)
+            else:
+                self.pattern_combo.setCurrentText(pattern)
+
+        # Base Stage
+        if 'base_stage' in self.initial_data:
+            stage = str(self.initial_data['base_stage'])
+            idx = self.stage_combo.findText(stage, Qt.MatchFlag.MatchFixedString)
+            if idx >= 0:
+                self.stage_combo.setCurrentIndex(idx)
+            else:
+                self.stage_combo.setCurrentText(stage)
+
+        # Base Depth
+        if 'base_depth' in self.initial_data:
+            try:
+                self.depth_input.setValue(float(self.initial_data['base_depth']))
+            except (ValueError, TypeError):
+                pass
+
+        # Base Length
+        if 'base_length' in self.initial_data:
+            try:
+                self.length_input.setValue(int(self.initial_data['base_length']))
+            except (ValueError, TypeError):
+                pass
+
+        # RS Rating
+        if 'rs_rating' in self.initial_data:
+            try:
+                self.rs_input.setValue(int(self.initial_data['rs_rating']))
+            except (ValueError, TypeError):
+                pass
+
     def _on_lookup(self):
         """Lookup stock data from IBKR/Massive."""
         symbol = self.symbol_input.text().strip().upper()
@@ -1372,7 +1432,88 @@ class EditPositionDialog(QDialog):
         
         position_group.setLayout(position_layout)
         layout.addWidget(position_group)
-        
+
+        # Exit / Close Section (for partial takes and full close)
+        exit_group = QGroupBox("Exit / Close")
+        exit_layout = QFormLayout()
+
+        # Take Profit 1
+        tp1_row = QHBoxLayout()
+        self.tp1_sold_input = QSpinBox()
+        self.tp1_sold_input.setRange(0, 100000)
+        tp1_row.addWidget(QLabel("Shares:"))
+        tp1_row.addWidget(self.tp1_sold_input)
+        self.tp1_price_input = QDoubleSpinBox()
+        self.tp1_price_input.setRange(0, 100000)
+        self.tp1_price_input.setDecimals(2)
+        self.tp1_price_input.setPrefix("$")
+        tp1_row.addWidget(QLabel("Price:"))
+        tp1_row.addWidget(self.tp1_price_input)
+        self.tp1_date_input = QDateEdit()
+        self.tp1_date_input.setCalendarPopup(True)
+        self.tp1_date_input.setSpecialValueText("Not Set")
+        tp1_row.addWidget(self.tp1_date_input)
+        exit_layout.addRow("TP1 Sold:", tp1_row)
+
+        # Take Profit 2
+        tp2_row = QHBoxLayout()
+        self.tp2_sold_input = QSpinBox()
+        self.tp2_sold_input.setRange(0, 100000)
+        tp2_row.addWidget(QLabel("Shares:"))
+        tp2_row.addWidget(self.tp2_sold_input)
+        self.tp2_price_input = QDoubleSpinBox()
+        self.tp2_price_input.setRange(0, 100000)
+        self.tp2_price_input.setDecimals(2)
+        self.tp2_price_input.setPrefix("$")
+        tp2_row.addWidget(QLabel("Price:"))
+        tp2_row.addWidget(self.tp2_price_input)
+        self.tp2_date_input = QDateEdit()
+        self.tp2_date_input.setCalendarPopup(True)
+        self.tp2_date_input.setSpecialValueText("Not Set")
+        tp2_row.addWidget(self.tp2_date_input)
+        exit_layout.addRow("TP2 Sold:", tp2_row)
+
+        # Close Price / Date (for full position close)
+        close_row = QHBoxLayout()
+        self.close_price_input = QDoubleSpinBox()
+        self.close_price_input.setRange(0, 100000)
+        self.close_price_input.setDecimals(2)
+        self.close_price_input.setPrefix("$")
+        self.close_price_input.valueChanged.connect(self._calculate_pnl)
+        close_row.addWidget(QLabel("Price:"))
+        close_row.addWidget(self.close_price_input)
+        self.close_date_input = QDateEdit()
+        self.close_date_input.setCalendarPopup(True)
+        self.close_date_input.setSpecialValueText("Not Set")
+        close_row.addWidget(self.close_date_input)
+        exit_layout.addRow("Close:", close_row)
+
+        # Close Reason
+        self.close_reason_combo = QComboBox()
+        self.close_reason_combo.setEditable(True)
+        self.close_reason_combo.addItems([
+            "", "STOP_HIT", "TP_HIT", "TRAILING_STOP", "MANUAL",
+            "50MA_BREAKDOWN", "21EMA_BREAKDOWN", "10W_BREAKDOWN",
+            "EARNINGS", "NEWS", "MARKET_CORRECTION", "OTHER"
+        ])
+        exit_layout.addRow("Close Reason:", self.close_reason_combo)
+
+        # Realized P&L Display (calculated)
+        pnl_row = QHBoxLayout()
+        self.pnl_pct_label = QLabel("0.00%")
+        self.pnl_pct_label.setStyleSheet("font-weight: bold; font-size: 14px;")
+        pnl_row.addWidget(QLabel("P&L %:"))
+        pnl_row.addWidget(self.pnl_pct_label)
+        self.pnl_dollar_label = QLabel("$0.00")
+        self.pnl_dollar_label.setStyleSheet("font-weight: bold; font-size: 14px;")
+        pnl_row.addWidget(QLabel("P&L $:"))
+        pnl_row.addWidget(self.pnl_dollar_label)
+        pnl_row.addStretch()
+        exit_layout.addRow("Realized:", pnl_row)
+
+        exit_group.setLayout(exit_layout)
+        layout.addWidget(exit_group)
+
         # Dates
         dates_group = QGroupBox("Key Dates")
         dates_layout = QFormLayout()
@@ -1512,74 +1653,198 @@ class EditPositionDialog(QDialog):
         self.e2_price_input.setValue(float(data.get('e2_price') or 0))
         self.e3_shares_input.setValue(int(data.get('e3_shares') or 0))
         self.e3_price_input.setValue(float(data.get('e3_price') or 0))
-        
-        # Dates
+
+        # Exit / Close fields
+        self.tp1_sold_input.setValue(int(data.get('tp1_sold') or 0))
+        self.tp1_price_input.setValue(float(data.get('tp1_price') or 0))
+        self.tp2_sold_input.setValue(int(data.get('tp2_sold') or 0))
+        self.tp2_price_input.setValue(float(data.get('tp2_price') or 0))
+        self.close_price_input.setValue(float(data.get('close_price') or 0))
+
+        if data.get('close_reason'):
+            idx = self.close_reason_combo.findText(data['close_reason'])
+            if idx >= 0:
+                self.close_reason_combo.setCurrentIndex(idx)
+            else:
+                self.close_reason_combo.setCurrentText(data['close_reason'])
+
+        # Dates (including exit dates)
         for field, widget in [
             ('watch_date', self.watch_date_input),
             ('breakout_date', self.breakout_date_input),
             ('earnings_date', self.earnings_date_input),
+            ('tp1_date', self.tp1_date_input),
+            ('tp2_date', self.tp2_date_input),
+            ('close_date', self.close_date_input),
         ]:
             if data.get(field):
                 d = data[field]
                 if isinstance(d, date):
                     widget.setDate(QDate(d.year, d.month, d.day))
-        
+
         # Notes
         if data.get('notes'):
             self.notes_input.setPlainText(data['notes'])
+
+        # Calculate and display P&L
+        self._calculate_pnl()
     
+    def _calculate_pnl(self, _=None):
+        """Calculate and display realized P&L based on close price."""
+        pnl_pct, pnl_dollar = self._get_pnl_values()
+
+        # Update display labels
+        if pnl_pct is not None:
+            color = '#28A745' if pnl_pct >= 0 else '#DC3545'  # Green or Red
+            self.pnl_pct_label.setText(f"{pnl_pct:+.2f}%")
+            self.pnl_pct_label.setStyleSheet(f"font-weight: bold; font-size: 14px; color: {color};")
+            self.pnl_dollar_label.setText(f"${pnl_dollar:+,.2f}")
+            self.pnl_dollar_label.setStyleSheet(f"font-weight: bold; font-size: 14px; color: {color};")
+        else:
+            self.pnl_pct_label.setText("--")
+            self.pnl_pct_label.setStyleSheet("font-weight: bold; font-size: 14px; color: #666;")
+            self.pnl_dollar_label.setText("--")
+            self.pnl_dollar_label.setStyleSheet("font-weight: bold; font-size: 14px; color: #666;")
+
+    def _get_pnl_values(self):
+        """
+        Calculate P&L values based on entries, exits, and close price.
+
+        Returns:
+            Tuple of (pnl_pct, pnl_dollar) or (None, None) if can't calculate
+        """
+        # Get entry data
+        e1_shares = self.e1_shares_input.value()
+        e1_price = self.e1_price_input.value()
+        e2_shares = self.e2_shares_input.value()
+        e2_price = self.e2_price_input.value()
+        e3_shares = self.e3_shares_input.value()
+        e3_price = self.e3_price_input.value()
+
+        # Get exit data
+        tp1_sold = self.tp1_sold_input.value()
+        tp1_price = self.tp1_price_input.value()
+        tp2_sold = self.tp2_sold_input.value()
+        tp2_price = self.tp2_price_input.value()
+        close_price = self.close_price_input.value()
+
+        # Calculate total entry cost
+        total_shares = e1_shares + e2_shares + e3_shares
+        total_cost = (e1_shares * e1_price) + (e2_shares * e2_price) + (e3_shares * e3_price)
+
+        if total_shares <= 0 or total_cost <= 0:
+            return None, None
+
+        avg_cost = total_cost / total_shares
+
+        # Calculate total exit proceeds
+        # Partial exits at TP1/TP2 + remaining shares at close price
+        shares_remaining = total_shares - tp1_sold - tp2_sold
+        if shares_remaining < 0:
+            shares_remaining = 0
+
+        total_proceeds = 0
+        if tp1_sold > 0 and tp1_price > 0:
+            total_proceeds += tp1_sold * tp1_price
+        if tp2_sold > 0 and tp2_price > 0:
+            total_proceeds += tp2_sold * tp2_price
+        if shares_remaining > 0 and close_price > 0:
+            total_proceeds += shares_remaining * close_price
+
+        if total_proceeds <= 0:
+            # Use close_price for all shares if no exits recorded
+            if close_price > 0:
+                total_proceeds = total_shares * close_price
+            else:
+                return None, None
+
+        # Calculate P&L
+        pnl_dollar = total_proceeds - total_cost
+        pnl_pct = ((total_proceeds - total_cost) / total_cost) * 100
+
+        return pnl_pct, pnl_dollar
+
     def _on_save(self):
         """Handle save button click."""
+        # Helper to get spinbox value - returns value if > 0, else None
+        # This treats 0 as "not set" for price/rating fields
+        def get_value(spinbox):
+            val = spinbox.value()
+            return val if val > 0 else None
+
+        # Helper for values where 0 is valid (like shares)
+        def get_value_allow_zero(spinbox):
+            val = spinbox.value()
+            # Return None only if at minimum (unset state)
+            return val if val > spinbox.minimum() else None
+
         # Collect all fields
         self.result_data = {
             'pattern': self.pattern_combo.currentText() or None,
-            'pivot': self.pivot_input.value() or None,
-            'stop_price': self.stop_price_input.value() or None,
-            'hard_stop_pct': self.stop_pct_input.value() or None,
+            'pivot': get_value(self.pivot_input),
+            'stop_price': get_value(self.stop_price_input),
+            'hard_stop_pct': get_value(self.stop_pct_input),
             'portfolio': self.portfolio_combo.currentText() or None,
             'base_stage': self.stage_combo.currentText() or None,
-            'base_depth': self.depth_input.value() or None,
-            'base_length': self.length_input.value() or None,
+            'base_depth': get_value(self.depth_input),
+            'base_length': get_value(self.length_input),
             # Ratings
-            'rs_rating': self.rs_input.value() or None,
-            'rs_3mo': self.rs_3mo_input.value() or None,
-            'rs_6mo': self.rs_6mo_input.value() or None,
-            'eps_rating': self.eps_input.value() or None,
-            'comp_rating': self.comp_input.value() or None,
+            'rs_rating': get_value(self.rs_input),
+            'rs_3mo': get_value(self.rs_3mo_input),
+            'rs_6mo': get_value(self.rs_6mo_input),
+            'eps_rating': get_value(self.eps_input),
+            'comp_rating': get_value(self.comp_input),
             'smr_rating': self.smr_combo.currentText() or None,
             'ad_rating': self.ad_combo.currentText() or None,
-            'ud_vol_ratio': self.ud_ratio_input.value() or None,
+            'ud_vol_ratio': get_value(self.ud_ratio_input),
             # Industry
-            'industry_rank': self.industry_rank_input.value() or None,
+            'industry_rank': get_value(self.industry_rank_input),
             'industry_eps_rank': self.industry_eps_rank_input.text().strip() or None,
             'industry_rs_rank': self.industry_rs_rank_input.text().strip() or None,
             # Institutional
-            'fund_count': self.fund_count_input.value() or None,
-            'funds_qtr_chg': self.funds_qtr_chg_input.value() or None,
-            'prior_uptrend': self.prior_uptrend_input.value() or None,
+            'fund_count': get_value(self.fund_count_input),
+            'funds_qtr_chg': get_value_allow_zero(self.funds_qtr_chg_input),  # Can be negative
+            'prior_uptrend': get_value(self.prior_uptrend_input),
             # Breakout quality
-            'breakout_vol_pct': self.breakout_vol_pct_input.value() or None,
-            'breakout_price_pct': self.breakout_price_pct_input.value() or None,
+            'breakout_vol_pct': get_value(self.breakout_vol_pct_input),
+            'breakout_price_pct': get_value_allow_zero(self.breakout_price_pct_input),  # Can be negative
             # Position
-            'e1_shares': self.e1_shares_input.value() or None,
-            'e1_price': self.e1_price_input.value() or None,
-            'e2_shares': self.e2_shares_input.value() or None,
-            'e2_price': self.e2_price_input.value() or None,
-            'e3_shares': self.e3_shares_input.value() or None,
-            'e3_price': self.e3_price_input.value() or None,
+            'e1_shares': get_value(self.e1_shares_input),
+            'e1_price': get_value(self.e1_price_input),
+            'e2_shares': get_value(self.e2_shares_input),
+            'e2_price': get_value(self.e2_price_input),
+            'e3_shares': get_value(self.e3_shares_input),
+            'e3_price': get_value(self.e3_price_input),
+            # Exit / Close
+            'tp1_sold': get_value(self.tp1_sold_input),
+            'tp1_price': get_value(self.tp1_price_input),
+            'tp2_sold': get_value(self.tp2_sold_input),
+            'tp2_price': get_value(self.tp2_price_input),
+            'close_price': get_value(self.close_price_input),
+            'close_reason': self.close_reason_combo.currentText() or None,
             'notes': self.notes_input.toPlainText() or None,
         }
-        
-        # Dates
+
+        # Calculate realized P&L if closed
+        close_price = self.close_price_input.value()
+        if close_price > 0:
+            pnl_pct, pnl_dollar = self._get_pnl_values()
+            self.result_data['realized_pnl'] = pnl_dollar
+            self.result_data['realized_pnl_pct'] = pnl_pct
+
+        # Dates (including exit dates)
         for field, widget in [
             ('watch_date', self.watch_date_input),
             ('breakout_date', self.breakout_date_input),
             ('earnings_date', self.earnings_date_input),
+            ('tp1_date', self.tp1_date_input),
+            ('tp2_date', self.tp2_date_input),
+            ('close_date', self.close_date_input),
         ]:
             qdate = widget.date()
             if qdate != widget.minimumDate():
                 self.result_data[field] = date(qdate.year(), qdate.month(), qdate.day())
-        
+
         self.accept()
     
     def get_result(self) -> Dict[str, Any]:
