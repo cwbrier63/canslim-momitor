@@ -1,24 +1,101 @@
-# CANSLIM Monitor - Default Configuration
-# Phase 1: Database Foundation
-#
-# This file contains default configuration values.
-# Copy to user_config.yaml and modify as needed.
-
-# Service Settings
 service:
   poll_intervals:
-    breakout: 60      # seconds
+    breakout: 60
     position: 30
     market: 300
   market_hours_only: true
-  market_open: "09:30"
-  market_close: "16:00"
-  timezone: "America/New_York"
-
-# Logging Settings
+  market_open: 09:30
+  market_close: '16:00'
+  timezone: America/New_York
+gui:
+  price_refresh_interval: 300
+  futures_refresh_interval: 300
+  service_status_interval: 60
+  table_views:
+    current_view: Default
+    views:
+      Default:
+        hidden_columns: []
+        column_order:
+        - 0
+        - 1
+        - 2
+        - 3
+        - 4
+        - 5
+        - 6
+        - 7
+        - 8
+        - 9
+        - 10
+        - 12
+        - 13
+        - 14
+        - 16
+        - 17
+        - 18
+        - 19
+        - 20
+        - 21
+        - 22
+        - 23
+        - 24
+        - 25
+        - 11
+        - 15
+        - 26
+        - 27
+        - 28
+        - 29
+        - 30
+        - 31
+        - 32
+        - 33
+        - 34
+        - 35
+        - 36
+        - 37
+        column_widths:
+          7: 28
+          11: 28
+          12: 28
+          13: 28
+          14: 28
+          15: 73
+          16: 28
+          17: 28
+          18: 28
+          19: 28
+          20: 28
+          21: 28
+          22: 28
+          23: 28
+          24: 28
+          25: 28
+          26: 82
+          27: 74
+          28: 28
+          29: 28
+          30: 28
+          32: 28
+          33: 28
+          34: 28
+          35: 28
+          36: 28
+          37: 0
+          31: 792
+          6: 97
+        sort_columns:
+        - - 31
+          - true
+earnings:
+  warning_thresholds:
+    critical: 5
+    caution: 10
+  auto_fetch: true
 logging:
-  base_dir: "C:/Trading/canslim_monitor/logs"
-  level: DEBUG        # DEBUG, INFO, WARNING, ERROR, CRITICAL
+  base_dir: C:/Trading/canslim_monitor/logs
+  level: DEBUG
   retention_days: 30
   console_level: INFO
   categories:
@@ -31,201 +108,175 @@ logging:
     sheets: DEBUG
     database: INFO
     gui: INFO
-
-# IBKR TWS Connection
 ibkr:
-  host: "127.0.0.1"
-  port: 4001          # 7497=TWS paper, 7496=live, 4001=IB Gateway paper, 4002=IB Gateway live
+  host: 127.0.0.1
+  port: 4001
   client_id_base: 20
   timeout: 30
   max_retries: 3
-
-# Discord Webhooks
+  reconnect:
+    enabled: true
+    initial_delay: 30
+    gateway_restart_delay: 180
+    max_delay: 300
+    backoff_factor: 1.5
+    max_attempts: 0
+    health_check_interval: 30
 discord:
   webhooks:
-    breakout: "https://discord.com/api/webhooks/1463607533905121330/9vFf1tHbl80hoxKdbGBn9F1Xj_x5kcNnSmydkx-KvIFamdwr0kfDDrQORVh0oimoN0vV"
-    position: "https://discord.com/api/webhooks/1463607772804550961/HU3Ey04VXfcYMAFmPe2a0sNxvPuxt-HPLId5vAc7QYl6o4OZQBqjO6sGR2RvjxtsMk7e"
-    market: "https://discord.com/api/webhooks/1460680942484979939/3mLJt0EHooCbO5c-TNqBNsZH1xSIp4wgFRFUxbT-vljJDMHF1Drfiw_4VUEyrZe2eKUT"
-    system: "https://discord.com/api/webhooks/1460681028111958191/MmyX6z70XyQurSGTdJ4HXxBaFs7a-yc8mRcTvmdxCwr4TX3I65WazxizZfnQ6MBTaawJ"
-    rate_limit: 30      # messages per minute
-
-# Google Sheets Integration
+    breakout: https://discord.com/api/webhooks/1463607533905121330/9vFf1tHbl80hoxKdbGBn9F1Xj_x5kcNnSmydkx-KvIFamdwr0kfDDrQORVh0oimoN0vV
+    position: https://discord.com/api/webhooks/1463607772804550961/HU3Ey04VXfcYMAFmPe2a0sNxvPuxt-HPLId5vAc7QYl6o4OZQBqjO6sGR2RvjxtsMk7e
+    market: https://discord.com/api/webhooks/1460680942484979939/3mLJt0EHooCbO5c-TNqBNsZH1xSIp4wgFRFUxbT-vljJDMHF1Drfiw_4VUEyrZe2eKUT
+    system: https://discord.com/api/webhooks/1460681028111958191/MmyX6z70XyQurSGTdJ4HXxBaFs7a-yc8mRcTvmdxCwr4TX3I65WazxizZfnQ6MBTaawJ
+    rate_limit: 30
 google_sheets:
   enabled: true
-  spreadsheet_id: ""  # Fill in your spreadsheet ID
-  sheet_name: "Positions"
-  sync_interval: 300  # seconds
-
-# Market Data API (Polygon.io / Massive.com)
+  spreadsheet_id: 1yLPaurt35LtPOE84IzT48cLx5T_EiPpMqdvHICk5PLI
+  sheet_name: Positions
+  credentials_path: C:/Trading/canslim_monitor/google_credentials.json
+  sync_interval: 300
+  auto_sync: true
 market_data:
-  provider: "massive"                    # or "polygon"
-  api_key: "fpui1sxUevN9yn6swz8RgvsDzLuupy9U"
-  base_url: "https://api.polygon.io"     # Same format for both
+  provider: massive
+  api_key: fpui1sxUevN9yn6swz8RgvsDzLuupy9U
+  base_url: https://api.polygon.io
   timeout: 30
-  rate_limit_delay: 0.5                  # Seconds between requests (free tier)
-
-# CANSLIM Scoring Configuration
+  rate_limit_delay: 0.1
+maintenance:
+  run_hour: 17
+  run_minute: 0
+  enable_volume_update: true
+  enable_earnings_update: true
+  enable_cleanup: true
 scoring:
   use_learned_weights: false
-  rs_floor: 70        # RS Rating below this caps grade at C
-  
-  # Default weights (adjusted by learning system)
+  rs_floor: 70
   weights:
-    # Pattern/Setup
-    pattern_base_type: 10       # Cup w/Handle, Double Bottom, etc.
-    stage_adjustment: -5        # Penalty for late-stage bases
-    base_depth: -3              # Penalty for excessive depth
-    base_length: 2              # Bonus for longer bases
-    prior_uptrend: 3            # Bonus for strong prior uptrend
-    
-    # CANSLIM Factors
-    rs_rating: 4                # Points per 10 RS above 80
-    rs_90_plus: 5               # Bonus for RS 90+
-    rs_95_plus: 8               # Bonus for RS 95+
-    eps_rating: 2               # Points per 10 EPS above 80
-    comp_rating: 1              # Points per 10 Composite above 80
-    ad_rating_bonus: 5          # Bonus for A-B A/D rating
-    ad_rating_penalty: -8       # Penalty for D-E A/D rating
-    
-    # Volume
-    ud_vol_ratio: 3             # Bonus for positive U/D ratio
-    volume_at_pivot: 5          # Bonus for volume surge at pivot
-    
-    # Market Context
-    market_bullish: 3           # Bonus in bullish market
-    market_bearish: -5          # Penalty in bearish market
-  
-  # Grade thresholds
+    pattern_base_type: 10
+    stage_adjustment: -5
+    base_depth: -3
+    base_length: 2
+    prior_uptrend: 3
+    rs_rating: 4
+    rs_90_plus: 5
+    rs_95_plus: 8
+    eps_rating: 2
+    comp_rating: 1
+    ad_rating_bonus: 5
+    ad_rating_penalty: -8
+    ud_vol_ratio: 3
+    volume_at_pivot: 5
+    market_bullish: 3
+    market_bearish: -5
   thresholds:
     A_plus: 25
     A: 18
     B: 10
-    C: 0    # Below 10
-
-
-# Database Settings
+    C: 0
 database:
-  path: "c:/trading/canslim_monitor/canslim_positions.db"
-  backup_interval: 86400        # Daily backup (seconds)
-  backup_retain: 7              # Keep 7 backups
-
-# Position Management
+  path: c:/trading/canslim_monitor/canslim_positions.db
+  backup_interval: 86400
+  backup_retain: 7
 position_management:
-  default_stop_pct: 7.0         # Default hard stop percentage
-  default_tp1_pct: 20.0         # First profit target
-  default_tp2_pct: 30.0         # Second profit target
-  pyramid_1_pct: 2.5            # First pyramid point (above entry)
-  pyramid_2_pct: 5.0            # Second pyramid point (above entry)
-  max_extension_pct: 10.0       # Maximum buy zone extension
-
+  default_stop_pct: 7.0
+  default_tp1_pct: 20.0
+  default_tp2_pct: 25.0  # IBD recommends 25-30% for TP2
+  pyramid_1_pct: 2.5
+  pyramid_2_pct: 5.0
+  max_extension_pct: 10.0
 market_regime:
   enabled: true
-  alert_time: "08:30"      # 8 AM ET
-  use_indices: false       # true = SPX/COMP, false = SPY/QQQ
-
+  alert_time: 08:30
+  use_indices: false
 distribution_days:
   decline_threshold: -0.2
   lookback_days: 25
   rally_expiration_pct: 5.0
-  enable_stalling: false   # Set true to detect stall days
-
-
- # Position Monitoring Configuration
+  enable_stalling: false
 position_monitoring:
-  # Stop Loss Settings
   stop_loss:
-    base_pct: 7.0              # Base stop percentage for Stage 1
-    warning_buffer_pct: 2.0    # Warning when within this % of stop
-    # Stage multipliers (later stages = tighter stops)
+    base_pct: 7.0
+    warning_buffer_pct: 2.0
     stage_multipliers:
-      1: 1.00    # Stage 1: Full 7% stop
-      2: 0.85    # Stage 2: ~6% stop  
-      3: 0.70    # Stage 3: ~5% stop
-      4: 0.60    # Stage 4: ~4.2% stop
-      5: 0.50    # Stage 5: ~3.5% stop
-  
-  # Trailing Stop (activates after significant gain)
+      1: 1.0
+      2: 0.85
+      3: 0.7
+      4: 0.6
+      5: 0.5
   trailing_stop:
-    activation_pct: 15.0       # Activate at 15% gain
-    trail_pct: 8.0             # Trail by 8% from high
-  
-  # Pyramid Zones
+    activation_pct: 15.0
+    trail_pct: 8.0
   pyramid:
-    py1_min_pct: 0.0           # PY1 zone: 0-5% above entry
+    py1_min_pct: 0.0
     py1_max_pct: 5.0
-    py2_min_pct: 5.0           # PY2 zone: 5-10% above entry
+    py2_min_pct: 5.0
     py2_max_pct: 10.0
-    min_bars_since_entry: 2    # Wait 2 bars before pyramid alerts
-    pullback_ema_tolerance: 1.0  # 1% tolerance for 21 EMA touch
-  
-  # 8-Week Hold Rule (IBD methodology)
+    min_bars_since_entry: 2
+    pullback_ema_tolerance: 1.0
   eight_week_hold:
-    gain_threshold_pct: 20.0   # 20% gain to trigger
-    trigger_window_days: 21    # Within 3 weeks of breakout
-    hold_weeks: 8              # Hold for 8 weeks total
-  
-  # Technical Sell Rules
+    gain_threshold_pct: 20.0
+    trigger_window_days: 21
+    hold_weeks: 8
   technical:
-    ma_50_warning_pct: 2.0     # Warning when within 2% of 50 MA
-    ma_50_volume_confirm: 1.5  # Volume ratio for 50 MA sell (IBD gap fix)
-    ema_21_consecutive_days: 2 # Days below 21 EMA for late-stage sell
-  
-  # Health Monitoring
+    ma_50_warning_pct: 2.0
+    ma_50_volume_confirm: 1.5
+    ema_21_consecutive_days: 2
   health:
-    time_threshold_days: 60    # Days without progress
-    tp1_progress_threshold: 0.5  # Should achieve 50% of TP1
-    deep_base_threshold: 35.0  # Base depth % considered "too deep"
-    ud_ratio_warning: 0.8      # U/D ratio below this = warning
-  
-  # Earnings Alerts
+    time_threshold_days: 60
+    tp1_progress_threshold: 0.5
+    deep_base_threshold: 35.0
+    ud_ratio_warning: 0.8
   earnings:
-    warning_days: 14           # Alert 14 days before
-    critical_days: 5           # Urgent alert 5 days before
-    negative_threshold: 0.0    # P&L % below which = SELL before earnings
-    reduce_threshold: 10.0     # P&L % below which = REDUCE before earnings
-  
-  # Alert Cooldowns (minutes)
+    warning_days: 14
+    critical_days: 5
+    negative_threshold: 0.0
+    reduce_threshold: 10.0
   cooldowns:
-    hard_stop: 0               # Immediate - no cooldown
-    stop_warning: 120          # 2 hours
-    trailing_stop: 0           # Immediate
-    tp1: 1440                  # 24 hours
-    tp2: 1440                  # 24 hours
-    eight_week_hold: 10080     # 1 week
-    pyramid: 240               # 4 hours
-    ma_50_warning: 1440        # 24 hours
-    ma_50_sell: 1440           # 24 hours
-    ema_21_sell: 1440          # 24 hours
-    ten_week_sell: 10080       # 1 week
-    health_warning: 60         # 1 hour
-    health_critical: 60        # 1 hour
-    earnings: 1440             # 24 hours
-    late_stage: 10080          # 1 week
-
+    hard_stop: 0
+    stop_warning: 120
+    trailing_stop: 0
+    tp1: 1440
+    tp2: 1440
+    eight_week_hold: 10080
+    pyramid: 240
+    ma_50_warning: 1440
+    ma_50_sell: 1440
+    ema_21_sell: 1440
+    ten_week_sell: 10080
+    health_warning: 60
+    health_critical: 60
+    earnings: 1440
+    late_stage: 10080
 alerts:
-# Alert Configuration
-  enable_cooldown: true       # Master switch
-  cooldown_minutes: 60         # Cooldown period when enabled
-  enable_suppression: true     # Market suppression
-
+  enable_cooldown: true
+  cooldown_minutes: 60
+  enable_suppression: true
   breakout:
-    volume_threshold: 1.5       # Volume ratio for confirmation
-    buy_zone_pct: 5             # Maximum % above pivot
-    approaching_pct: 2          # Alert when within this % of pivot
+    volume_threshold: 1.5
+    buy_zone_pct: 5
+    approaching_pct: 2
     max_extended_pct: 7.0
     min_alert_grade: C
-    volume_threshold_confirmed: 1.4    # CONFIRMED: 40% above avg (IBD standard)
-    volume_threshold_buy_zone: 0.0     # IN_BUY_ZONE: 0 = alert ANY stock in buy zone
-    volume_threshold_approaching: 0.0  # APPROACHING: 0 = alert ANY stock near pivot
-
-
+    min_avg_volume: 500000
+    volume_threshold_confirmed: 1.4
+    volume_threshold_buy_zone: 0.0
+    volume_threshold_approaching: 0.0
   position:
-    stop_warning_pct: 2         # Warn when this close to stop
-    pyramid_min_bars: 2         # Minimum bars before pyramid alert
-
+    stop_warning_pct: 2
+    pyramid_min_bars: 2
+  alt_entry:
+    # Minimum extension before watching for pullback
+    min_extension_pct: 5.0
+    # MA bounce thresholds
+    ema_21_bounce_pct: 1.5    # Within 1.5% of 21 EMA
+    ma_50_bounce_pct: 2.0     # Within 2% of 50 MA
+    bounce_volume_min: 0.7    # At least 70% avg volume
+    # Pivot retest
+    pivot_retest_pct: 3.0     # Within 3% of pivot (back in buy zone)
+    # Cooldown
+    cooldown_hours: 4         # Hours between same alert type
   display:
-    default_days: 30        # Default days shown
-    auto_refresh: true      # Auto-refresh on by default
-    refresh_interval: 30    # Seconds between refresh
-    highlight_duration: 5   # Seconds to highlight new alev
-
+    default_days: 30
+    auto_refresh: true
+    refresh_interval: 30
+    highlight_duration: 5

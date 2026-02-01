@@ -399,27 +399,39 @@ ALERT_DESCRIPTIONS: Dict[Tuple[str, str], AlertDescription] = {
     ),
     
     ("ALT_ENTRY", "MA_BOUNCE"): AlertDescription(
-        title="Moving Average Bounce",
-        meaning="Stock is bouncing from a key moving average (21 EMA, 50 MA, or "
-                "10-week line). Alternative entry opportunity.",
-        ibd_context="MA bounces offer lower-risk entries than breakouts. You're "
-                    "buying closer to support with a defined stop level. These "
-                    "setups can have better risk/reward than pivot breakouts.",
-        recommended_action="Enter on confirmed bounce (close above MA on volume). "
-                          "Set stop 1-2% below the moving average.",
-        source_reference="MarketSurge - How to Find Alternative Buy Points"
+        title="Watchlist MA Pullback Entry",
+        meaning="A watchlist stock that was EXTENDED from its pivot (>5% above) has now "
+                "pulled back to a key moving average (21 EMA or 50 MA). This offers a "
+                "lower-risk alternative entry point than chasing the extended breakout.",
+        ibd_context="IBD teaches 'don't chase extended stocks.' But what if you missed the "
+                    "breakout? The solution is to wait for a pullback to support. The 21 EMA "
+                    "and 50 MA are institutional support levels where big money often adds. "
+                    "The first or second test of these levels has the highest success rate. "
+                    "Third test and beyond shows weakening support.",
+        recommended_action="Enter on confirmed bounce (price closes above MA with volume). "
+                          "Position size: Use normal 50% initial position. "
+                          "Stop loss: Set 1-2% below the moving average. "
+                          "Monitor: If stock fails to hold MA, exit immediately.",
+        source_reference="MarketSurge - How to Find Alternative Buy Points; "
+                        "MarketSurge - How to Enhance Trading with Moving Averages"
     ),
-    
+
     ("ALT_ENTRY", "PIVOT_RETEST"): AlertDescription(
-        title="Pivot Retest",
-        meaning="Stock broke out, pulled back, and is now retesting the original "
-                "pivot point as support. Second-chance entry.",
-        ibd_context="Failed breakouts that retest the pivot and hold can offer "
-                    "excellent second-chance entries. The pivot transforms from "
-                    "resistance to support.",
-        recommended_action="Enter if pivot holds as support on retest. Stop just "
-                          "below the pivot level (1-2% buffer).",
-        source_reference="MarketSurge - How to Find Alternative Buy Points"
+        title="Watchlist Pivot Retest Entry",
+        meaning="A watchlist stock that broke out and extended has now pulled back to "
+                "retest the original pivot point. The pivot that was resistance is now "
+                "being tested as support - a classic second-chance entry.",
+        ibd_context="Many successful breakouts pull back to 'kiss' the pivot goodbye. "
+                    "This retest transforms resistance into support. If the pivot holds, "
+                    "it confirms institutional commitment to the stock. This setup often "
+                    "has better risk/reward than the original breakout because your stop "
+                    "is tighter (just below the pivot).",
+        recommended_action="Enter if pivot holds as support (price bounces on volume). "
+                          "Position size: Use normal 50% initial position. "
+                          "Stop loss: Set 1-2% below pivot level. "
+                          "Target: Same as original breakout target.",
+        source_reference="MarketSurge - How to Find Alternative Buy Points; "
+                        "MarketSurge - The Anatomy of a Healthy Chart Pattern"
     ),
     
     # =========================================================================

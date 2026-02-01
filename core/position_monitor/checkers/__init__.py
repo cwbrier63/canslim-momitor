@@ -11,6 +11,7 @@ from .pyramid_checker import PyramidChecker
 from .ma_checker import MAChecker
 from .health_checker import HealthChecker
 from .reentry_checker import ReentryChecker
+from .watchlist_alt_entry_checker import WatchlistAltEntryChecker
 
 __all__ = [
     'BaseChecker',
@@ -21,6 +22,7 @@ __all__ = [
     'MAChecker',
     'HealthChecker',
     'ReentryChecker',
+    'WatchlistAltEntryChecker',
 ]
 
 # Default checker instances
@@ -31,4 +33,5 @@ DEFAULT_CHECKERS = [
     MAChecker,
     HealthChecker,
     ReentryChecker,
+    WatchlistAltEntryChecker,
 ]
