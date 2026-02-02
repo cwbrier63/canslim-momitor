@@ -27,15 +27,17 @@ from ..service.threads.base_thread import BaseThread
 from .models_regime import (
     RegimeType, DDayTrend, MarketRegimeAlert,
     IBDMarketStatus, EntryRiskLevel, IBDExposureCurrent,
+    PhaseChangeType, MarketPhaseHistory,
     create_regime_tables, Base
 )
 from .distribution_tracker import DistributionDayTracker, CombinedDistributionData
-from .ftd_tracker import FollowThroughDayTracker, MarketPhaseStatus
+from .ftd_tracker import FollowThroughDayTracker, MarketPhaseStatus, MarketPhase
 from .market_regime import (
     MarketRegimeCalculator, DistributionData, OvernightData,
     FTDData, RegimeScore, create_overnight_data,
     calculate_entry_risk_score
 )
+from .market_phase_manager import MarketPhaseManager
 from .historical_data import fetch_spy_qqq_daily, DailyBar
 from .discord_regime import DiscordRegimeNotifier
 
@@ -99,7 +101,8 @@ class RegimeThread(BaseThread):
         self._ftd_tracker: Optional[FollowThroughDayTracker] = None
         self._calculator: Optional[MarketRegimeCalculator] = None
         self._discord_regime: Optional[DiscordRegimeNotifier] = None
-        
+        self._phase_manager: Optional[MarketPhaseManager] = None
+
         # Ensure regime tables exist
         self._ensure_tables()
     
@@ -118,10 +121,10 @@ class RegimeThread(BaseThread):
     def _get_components(self):
         """Lazy initialize components."""
         if not self.db_session_factory:
-            return None, None, None
-        
+            return None, None, None, None
+
         session = self.db_session_factory()
-        
+
         if self._distribution_tracker is None:
             dist_config = self.config.get('distribution_days', {})
             self._distribution_tracker = DistributionDayTracker(
@@ -133,60 +136,118 @@ class RegimeThread(BaseThread):
                 enable_stalling=dist_config.get('enable_stalling', False),
                 use_indices=self.use_indices
             )
-        
+
         if self._ftd_tracker is None:
             self._ftd_tracker = FollowThroughDayTracker(
                 db_session=session,
                 ftd_min_gain=self.config.get('ftd_min_gain', 1.25),
                 ftd_earliest_day=self.config.get('ftd_earliest_day', 4)
             )
-        
+
         if self._calculator is None:
             self._calculator = MarketRegimeCalculator(self.config.get('market_regime', {}))
-        
-        return self._distribution_tracker, self._ftd_tracker, self._calculator
+
+        if self._phase_manager is None:
+            phase_config = self.config.get('market_phase', {})
+            thresholds = {
+                'pressure_min_ddays': phase_config.get('pressure_threshold', 5),
+                'correction_min_ddays': phase_config.get('correction_threshold', 7),
+                'confirmed_max_ddays': phase_config.get('confirmed_max_ddays', 4),
+            }
+            self._phase_manager = MarketPhaseManager(
+                db_session=session,
+                thresholds=thresholds
+            )
+
+        return self._distribution_tracker, self._ftd_tracker, self._calculator, self._phase_manager
     
+    def _is_in_morning_window(self) -> bool:
+        """
+        Check if we're in the morning analysis window.
+        Returns True if current time is between alert_time and alert_time + 1 hour.
+        """
+        try:
+            import pytz
+            et = pytz.timezone('US/Eastern')
+            now = datetime.now(et)
+            tz_used = "pytz/US/Eastern"
+        except ImportError:
+            self.logger.warning("pytz not available - using local time (may cause timing issues)")
+            now = datetime.now()
+            tz_used = "local"
+
+        target_hour, target_minute = map(int, self.alert_time.split(':'))
+        current_minutes = now.hour * 60 + now.minute
+        target_minutes = target_hour * 60 + target_minute
+        window_end_minutes = target_minutes + 60  # 1 hour window after target
+
+        in_window = target_minutes <= current_minutes <= window_end_minutes
+
+        self.logger.debug(
+            f"Morning window check: time={now.hour}:{now.minute:02d} ({tz_used}), "
+            f"target={self.alert_time}, current_min={current_minutes}, "
+            f"target_min={target_minutes}, window_end={window_end_minutes}, "
+            f"in_window={in_window}"
+        )
+
+        return in_window
+
     def _should_run(self) -> bool:
         """
         Determine if we should run analysis.
-        
+
         Primary run: 8 AM ET (configurable)
         Intraday: Optional updates during market hours
         """
         if not self.enabled:
             self.logger.debug("Regime thread disabled via config")
             return False
-        
+
         try:
             import pytz
             et = pytz.timezone('US/Eastern')
             now = datetime.now(et)
+            tz_used = "pytz/US/Eastern"
         except ImportError:
+            self.logger.warning("pytz not available - using local time (may cause timing issues)")
             now = datetime.now()
-        
+            tz_used = "local"
+
         # Skip weekends
         if now.weekday() >= 5:
             self.logger.debug(f"Skipping - weekend (weekday={now.weekday()})")
             return False
-        
+
         # Parse alert time
-        hour, minute = map(int, self.alert_time.split(':'))
-        
-        # Morning analysis window: around the alert time
-        if hour - 1 <= now.hour <= hour + 1:
+        target_hour, target_minute = map(int, self.alert_time.split(':'))
+
+        # Morning analysis window: from target time to target + 1 hour
+        # Must be AT or AFTER the target time, not before
+        current_minutes = now.hour * 60 + now.minute
+        target_minutes = target_hour * 60 + target_minute
+        window_end_minutes = target_minutes + 60  # 1 hour window after target
+
+        if target_minutes <= current_minutes <= window_end_minutes:
             # Only run once per day for morning analysis
             if self._last_analysis_date == now.date():
                 self.logger.debug(f"Morning analysis already completed for {now.date()}")
                 return False
-            self.logger.debug(f"Morning analysis window active (hour={now.hour}, target={hour})")
+            self.logger.info(
+                f"Morning analysis window active - time={now.hour}:{now.minute:02d} ({tz_used}), "
+                f"target={self.alert_time}, will run morning analysis"
+            )
             return True
-        
-        # During market hours, can run for intraday updates
+
+        # During market hours, can run for intraday updates (but NOT morning analysis)
         if 9 <= now.hour <= 16:
-            self.logger.debug(f"Market hours - intraday check (hour={now.hour})")
+            self.logger.debug(f"Market hours - intraday check only (hour={now.hour})")
             return True
-        
-        self.logger.debug(f"Outside run window (hour={now.hour}, alert_time={self.alert_time})")
+
+        self.logger.debug(
+            f"Outside run window - time={now.hour}:{now.minute:02d} ({tz_used}), "
+            f"current_min={current_minutes}, target_min={target_minutes}, "
+            f"alert_time={self.alert_time}"
+        )
         return False
     
     def _do_work(self):
@@ -195,42 +256,60 @@ class RegimeThread(BaseThread):
             import pytz
             et = pytz.timezone('US/Eastern')
             now = datetime.now(et)
+            tz_used = "pytz/US/Eastern"
         except ImportError:
+            self.logger.warning("pytz not available in _do_work - using local time")
             now = datetime.now()
-        
+            tz_used = "local"
+
         today = now.date()
-        
-        # Morning analysis (runs once per day)
+
+        # Morning analysis (runs once per day, ONLY in morning window)
         if self._last_analysis_date != today:
-            self.logger.info("Running morning regime analysis")
+            # CRITICAL: Double-check we're in the morning window before running
+            # This prevents analysis from running during market hours if it was missed
+            if not self._is_in_morning_window():
+                self.logger.info(
+                    f"Skipping morning analysis - outside morning window "
+                    f"(time={now.hour}:{now.minute:02d} {tz_used}, target={self.alert_time}). "
+                    f"Analysis will run tomorrow at {self.alert_time} ET."
+                )
+                # Mark as done for today to prevent repeated log spam
+                self._last_analysis_date = today
+                return
+
+            self.logger.info(
+                f"Running morning regime analysis at {now.hour}:{now.minute:02d} {tz_used}"
+            )
             score = self._run_full_analysis()
-            
+
             if score:
                 self._last_regime_score = score
                 self._last_analysis_date = today
-                
+
                 # Send Discord alert
                 self._send_discord_alert(score)
-            
+
             return
-        
+
         # Intraday - could add lighter weight updates here
         self.logger.debug("Intraday regime check (no action)")
     
     def _run_full_analysis(self) -> Optional[RegimeScore]:
         """
         Run complete regime analysis.
-        
+
         Steps:
         1. Fetch historical data from Polygon/Massive
         2. Calculate distribution days
         3. Check for Follow-Through Day
         4. Get overnight futures (if IBKR available)
-        5. Calculate weighted regime score
-        6. Save to database
+        5. Evaluate market phase transitions
+        6. Calculate weighted regime score
+        7. Save to database
         """
-        dist_tracker, ftd_tracker, calculator = self._get_components()
-        
+        dist_tracker, ftd_tracker, calculator, phase_manager = self._get_components()
+
         if not all([dist_tracker, ftd_tracker, calculator]):
             self.logger.error("Could not initialize regime components")
             return None
@@ -280,7 +359,36 @@ class RegimeThread(BaseThread):
             )
             
             self.logger.info(f"Market Phase: {ftd_status.phase.value}")
-            
+
+            # Step 3b: Check for phase transitions using MarketPhaseManager
+            phase_transition = None
+            if phase_manager:
+                phase_transition = phase_manager.update_phase(
+                    dist_data=combined_dist,
+                    ftd_data=ftd_status
+                )
+
+                if phase_transition and phase_transition.phase_changed:
+                    self.logger.info(
+                        f"Phase transition: {phase_transition.previous_phase.value} -> "
+                        f"{phase_transition.current_phase.value} ({phase_transition.change_type.value})"
+                    )
+
+                    # Send phase change alert - create MarketPhaseHistory for Discord
+                    phase_history = MarketPhaseHistory(
+                        phase_date=date.today(),
+                        previous_phase=phase_transition.previous_phase.value,
+                        new_phase=phase_transition.current_phase.value,
+                        change_type=phase_transition.change_type.value,
+                        trigger_reason=phase_transition.trigger_reason,
+                        spy_dday_count=combined_dist.spy_count,
+                        qqq_dday_count=combined_dist.qqq_count,
+                        total_dday_count=combined_dist.spy_count + combined_dist.qqq_count,
+                        spy_expired_today=getattr(combined_dist, 'spy_expired_today', 0),
+                        qqq_expired_today=getattr(combined_dist, 'qqq_expired_today', 0)
+                    )
+                    self._send_phase_change_alert(phase_history, combined_dist)
+
             # Build FTD data for calculator
             trading_days = [bar.date for bar in spy_bars]
             rally_histogram = ftd_tracker.build_rally_histogram(trading_days)
@@ -407,7 +515,7 @@ class RegimeThread(BaseThread):
                     qqq_count=prior.qqq_d_count,
                     spy_5day_delta=prior.spy_5day_delta or 0,
                     qqq_5day_delta=prior.qqq_5day_delta or 0,
-                    trend=prior.d_day_trend or DDayTrend.FLAT
+                    trend=prior.d_day_trend or DDayTrend.STABLE
                 )
                 
                 overnight = OvernightData(
@@ -622,7 +730,86 @@ class RegimeThread(BaseThread):
                 self.logger.info("Regime alert sent via generic notifier")
             except Exception as e:
                 self.logger.error(f"Error sending Discord alert: {e}")
-    
+
+    def _send_phase_change_alert(
+        self,
+        phase_history: MarketPhaseHistory,
+        dist_data: CombinedDistributionData = None
+    ):
+        """Send phase change alert via Discord."""
+        discord_config = self.config.get('discord', {})
+        webhooks = discord_config.get('webhooks', {})
+
+        # Look for regime webhook
+        webhook_url = (
+            webhooks.get('regime_webhook_url') or
+            webhooks.get('market') or
+            discord_config.get('regime_webhook_url') or
+            discord_config.get('webhook_url')
+        )
+
+        if not webhook_url:
+            self.logger.debug("No webhook URL configured for phase change alerts")
+            return
+
+        try:
+            if self._discord_regime is None:
+                self._discord_regime = DiscordRegimeNotifier(webhook_url=webhook_url)
+
+            success = self._discord_regime.send_phase_change_alert(
+                phase_history=phase_history,
+                dist_data=dist_data
+            )
+
+            if success:
+                self.increment_message_count()
+                self.logger.info(
+                    f"Phase change alert sent: {phase_history.previous_phase} -> "
+                    f"{phase_history.new_phase}"
+                )
+
+        except Exception as e:
+            self.logger.error(f"Error sending phase change alert: {e}")
+
+    def _send_ftd_alert(
+        self,
+        ftd_date: date,
+        gain_pct: float,
+        volume_pct: float = None,
+        from_pressure: bool = False
+    ):
+        """Send FTD alert via Discord."""
+        discord_config = self.config.get('discord', {})
+        webhooks = discord_config.get('webhooks', {})
+
+        webhook_url = (
+            webhooks.get('regime_webhook_url') or
+            webhooks.get('market') or
+            discord_config.get('regime_webhook_url') or
+            discord_config.get('webhook_url')
+        )
+
+        if not webhook_url:
+            return
+
+        try:
+            if self._discord_regime is None:
+                self._discord_regime = DiscordRegimeNotifier(webhook_url=webhook_url)
+
+            success = self._discord_regime.send_ftd_alert(
+                ftd_date=ftd_date,
+                ftd_gain_pct=gain_pct,
+                volume_pct=volume_pct,
+                from_pressure=from_pressure
+            )
+
+            if success:
+                self.increment_message_count()
+                self.logger.info(f"FTD alert sent for {ftd_date}")
+
+        except Exception as e:
+            self.logger.error(f"Error sending FTD alert: {e}")
+
     def _format_simple_alert(self, score: RegimeScore) -> str:
         """Format a simple alert for generic Discord notifier."""
         regime_emoji = {

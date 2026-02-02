@@ -24,17 +24,18 @@ class PositionState(IntEnum):
 @dataclass
 class StateInfo:
     """Information about a position state."""
-    value: int
+    value: float  # Changed to float to support State -1.5
     name: str
     display_name: str
     description: str
     color: str  # Hex color for UI
     next_action: str
-    column_order: int  # Order in Kanban board
+    column_order: float  # Order in Kanban board (float to support intermediate positions)
 
 
 # State definitions
-STATES: Dict[int, StateInfo] = {
+# Note: Using Dict[float, StateInfo] to support State -1.5
+STATES: Dict[float, StateInfo] = {
     PositionState.STOPPED_OUT: StateInfo(
         value=-2,
         name='STOPPED_OUT',
@@ -42,7 +43,7 @@ STATES: Dict[int, StateInfo] = {
         description='Position closed at stop loss',
         color='#DC3545',  # Red
         next_action='Review and learn',
-        column_order=8
+        column_order=9
     ),
     PositionState.CLOSED: StateInfo(
         value=-1,
@@ -51,6 +52,16 @@ STATES: Dict[int, StateInfo] = {
         description='Position manually closed',
         color='#6C757D',  # Gray
         next_action='Archive',
+        column_order=8
+    ),
+    # State -1.5: Watching Exited (for re-entry monitoring)
+    -1.5: StateInfo(
+        value=-1.5,
+        name='WATCHING_EXITED',
+        display_name='Exited Watch',
+        description='Previously owned, monitoring for re-entry opportunity',
+        color='#9C27B0',  # Purple - distinct from other states
+        next_action='Monitor for MA bounce or pivot retest',
         column_order=7
     ),
     PositionState.WATCHING: StateInfo(
@@ -123,8 +134,8 @@ STATES: Dict[int, StateInfo] = {
 @dataclass
 class StateTransition:
     """Defines a valid state transition."""
-    from_state: int
-    to_state: int
+    from_state: float  # Changed to float to support State -1.5
+    to_state: float    # Changed to float to support State -1.5
     required_fields: List[str]
     optional_fields: List[str]
     description: str
@@ -303,6 +314,80 @@ VALID_TRANSITIONS: List[StateTransition] = [
         optional_fields=['notes'],
         description='Remove from watchlist'
     ),
+
+    # =========================================================================
+    # State -1.5 (WATCHING_EXITED) Transitions
+    # =========================================================================
+
+    # From active states to -1.5 (non-profit exits - stop loss or technical sell)
+    StateTransition(
+        from_state=1, to_state=-1.5,
+        required_fields=['close_date', 'close_price', 'close_reason'],
+        optional_fields=['notes'],
+        description='Stop out to re-entry watch'
+    ),
+    StateTransition(
+        from_state=2, to_state=-1.5,
+        required_fields=['close_date', 'close_price', 'close_reason'],
+        optional_fields=['notes'],
+        description='Stop out to re-entry watch'
+    ),
+    StateTransition(
+        from_state=3, to_state=-1.5,
+        required_fields=['close_date', 'close_price', 'close_reason'],
+        optional_fields=['notes'],
+        description='Technical sell to re-entry watch'
+    ),
+    StateTransition(
+        from_state=4, to_state=-1.5,
+        required_fields=['close_date', 'close_price', 'close_reason'],
+        optional_fields=['notes'],
+        description='Exit to re-entry watch'
+    ),
+    StateTransition(
+        from_state=5, to_state=-1.5,
+        required_fields=['close_date', 'close_price', 'close_reason'],
+        optional_fields=['notes'],
+        description='Exit to re-entry watch'
+    ),
+    StateTransition(
+        from_state=6, to_state=-1.5,
+        required_fields=['close_date', 'close_price', 'close_reason'],
+        optional_fields=['notes'],
+        description='Trailing stop to re-entry watch'
+    ),
+
+    # From -1.5 to re-entry (back to State 1)
+    StateTransition(
+        from_state=-1.5, to_state=1,
+        required_fields=['e1_shares', 'e1_price', 'stop_price'],
+        optional_fields=['entry_date', 'notes'],
+        description='Re-entry from exited watch'
+    ),
+
+    # From -1.5 to archive (gave up or 60 days elapsed)
+    StateTransition(
+        from_state=-1.5, to_state=-2,
+        required_fields=[],
+        optional_fields=['notes'],
+        description='Archive from exited watch (auto-expire or manual)'
+    ),
+
+    # From -1.5 to closed (manual removal - user decides not to re-enter)
+    StateTransition(
+        from_state=-1.5, to_state=-1,
+        required_fields=[],
+        optional_fields=['notes'],
+        description='Close from exited watch (manual removal)'
+    ),
+
+    # From -1.5 back to regular watchlist (new base forming)
+    StateTransition(
+        from_state=-1.5, to_state=0,
+        required_fields=['pivot'],
+        optional_fields=['notes'],
+        description='New base - return to watchlist'
+    ),
 ]
 
 
@@ -389,7 +474,29 @@ EXIT_REASONS = [
     'SECTOR_ROTATION',   # Sector falling out of favor
     'RS_DETERIORATION',  # Relative strength declining
     'VOLUME_DRY_UP',     # Volume declining significantly
+    'CLIMAX_TOP',        # Climax top detected (full profit close)
     'OTHER'              # Other reason (see notes)
+]
+
+# Exit reasons that should route to State -1.5 (re-entry watch) instead of -2/-1
+# These are non-profit exits where re-entry is possible
+REENTRY_WATCH_REASONS = [
+    'STOP_HIT',          # May re-enter if setup improves
+    '50MA_BREAKDOWN',    # May bounce and recover
+    '10WMA_BREAKDOWN',   # Technical exit, fundamentals may still be good
+    'MARKET_CORRECTION', # Stock may resume when market improves
+]
+
+# Exit reasons that should route to State -1 or -2 (no re-entry monitoring)
+# These are profit takes or terminal exits
+TERMINAL_EXIT_REASONS = [
+    'TP1_HIT',           # Profit taken by design
+    'TP2_HIT',           # Profit taken by design
+    'TRAILING_STOP',     # Profit taken via trailing
+    'CLIMAX_TOP',        # Full profit taken, pattern exhausted
+    'MANUAL_CLOSE',      # User decision
+    'SECTOR_ROTATION',   # Fundamentals changed
+    'RS_DETERIORATION',  # Stock quality declined
 ]
 
 # Trade outcome classifications for learning

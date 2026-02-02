@@ -182,20 +182,35 @@ class RallyStatus:
     ftd_still_valid: bool = False
 
 
-@dataclass 
+@dataclass
+class FTDFromPressureResult:
+    """Result of checking for FTD from Uptrend Under Pressure."""
+    triggered: bool = False
+    symbol: Optional[str] = None
+    gain_pct: float = 0.0
+    volume_ratio: float = 0.0
+    prior_d_day_count: int = 0
+    reason: str = ""
+
+
+@dataclass
 class MarketPhaseStatus:
     """Combined market phase status across indexes."""
     phase: MarketPhase
     spy_status: RallyStatus
     qqq_status: RallyStatus
-    
+
     # Combined signals
     any_ftd_today: bool = False
     any_rally_failed: bool = False
     days_since_last_ftd: Optional[int] = None
-    
+
     # Regime integration
     ftd_score_adjustment: float = 0.0  # Add to regime score
+
+    # FTD from Uptrend Under Pressure
+    ftd_from_pressure: Optional[FTDFromPressureResult] = None
+    rally_failed_today: bool = False  # Alias for any_rally_failed for compatibility
 
 
 class FollowThroughDayTracker:
@@ -268,6 +283,79 @@ class FollowThroughDayTracker:
         
         return True, gain_pct, volume_ratio
     
+    def check_ftd_from_pressure(
+        self,
+        symbol: str,
+        today: DailyBar,
+        yesterday: DailyBar,
+        current_phase: MarketPhase,
+        total_d_days: int,
+        min_gain: float = None
+    ) -> FTDFromPressureResult:
+        """
+        Check if today qualifies as an FTD from Uptrend Under Pressure.
+
+        This occurs when:
+        1. Market is in UPTREND_PRESSURE phase (confirmed but elevated D-days)
+        2. Today has a strong gain (>= 1.25% default)
+        3. Volume is higher than yesterday
+
+        This signals the market is recovering from distribution pressure
+        and can return to CONFIRMED_UPTREND.
+
+        Args:
+            symbol: Index symbol (SPY, QQQ)
+            today: Today's DailyBar
+            yesterday: Yesterday's DailyBar
+            current_phase: Current market phase
+            total_d_days: Total distribution day count
+            min_gain: Minimum gain percentage (default: FTD threshold)
+
+        Returns:
+            FTDFromPressureResult with trigger status
+        """
+        result = FTDFromPressureResult()
+        min_gain = min_gain or self.ftd_min_gain
+
+        # Must be in UPTREND_PRESSURE phase
+        if current_phase != MarketPhase.UPTREND_PRESSURE:
+            result.reason = "Not in UPTREND_PRESSURE phase"
+            return result
+
+        # Calculate gain
+        gain_pct = self._get_pct_change(today, yesterday)
+        result.gain_pct = gain_pct
+
+        # Must have strong gain
+        if gain_pct < min_gain:
+            result.reason = f"Gain {gain_pct:.2f}% below threshold {min_gain}%"
+            return result
+
+        # Volume must be higher than yesterday
+        volume_ratio = today.volume / yesterday.volume if yesterday.volume > 0 else 0
+        result.volume_ratio = volume_ratio
+
+        if volume_ratio <= 1.0:
+            result.reason = f"Volume ratio {volume_ratio:.2f} not above 1.0"
+            return result
+
+        # All conditions met - this is an FTD from pressure
+        result.triggered = True
+        result.symbol = symbol
+        result.prior_d_day_count = total_d_days
+        result.reason = (
+            f"Strong gain ({gain_pct:.2f}%) on elevated volume ({volume_ratio:.2f}x) "
+            f"while in UPTREND_PRESSURE with {total_d_days} D-days"
+        )
+
+        logger.info(
+            f"{symbol} FTD FROM PRESSURE detected: "
+            f"+{gain_pct:.2f}%, Vol ratio: {volume_ratio:.2f}x, "
+            f"D-days: {total_d_days}"
+        )
+
+        return result
+
     def _find_rally_start(self, bars: List[DailyBar], lookback: int = 30) -> Optional[int]:
         """
         Find the start of a rally attempt (first up day after new low).
@@ -481,35 +569,37 @@ class FollowThroughDayTracker:
         spy_bars: List[DailyBar],
         qqq_bars: List[DailyBar],
         spy_d_count: int = 0,
-        qqq_d_count: int = 0
+        qqq_d_count: int = 0,
+        check_pressure_ftd: bool = True
     ) -> MarketPhaseStatus:
         """
         Get combined market phase status across SPY and QQQ.
-        
+
         This determines the overall market phase for regime calculation.
-        
+
         Args:
             spy_bars: SPY daily bars
             qqq_bars: QQQ daily bars
             spy_d_count: Current SPY distribution day count
             qqq_d_count: Current QQQ distribution day count
-        
+            check_pressure_ftd: Whether to check for FTD from pressure
+
         Returns:
             MarketPhaseStatus with combined signals
         """
         spy_status = self.update_rally_status('SPY', spy_bars)
         qqq_status = self.update_rally_status('QQQ', qqq_bars)
-        
+
         # Determine overall phase
         any_ftd_today = spy_status.ftd_today or qqq_status.ftd_today
         any_confirmed_ftd = spy_status.has_confirmed_ftd or qqq_status.has_confirmed_ftd
         any_ftd_valid = spy_status.ftd_still_valid or qqq_status.ftd_still_valid
         any_rally_attempt = spy_status.in_rally_attempt or qqq_status.in_rally_attempt
         any_rally_failed = spy_status.failed_today or qqq_status.failed_today
-        
+
         total_d_days = spy_d_count + qqq_d_count
-        
-        # Determine phase
+
+        # Determine initial phase
         if any_confirmed_ftd and any_ftd_valid:
             if total_d_days >= 5:
                 phase = MarketPhase.UPTREND_PRESSURE
@@ -519,12 +609,51 @@ class FollowThroughDayTracker:
             phase = MarketPhase.RALLY_ATTEMPT
         else:
             phase = MarketPhase.CORRECTION
-        
+
+        # Check for FTD from Uptrend Under Pressure
+        ftd_from_pressure = None
+        if check_pressure_ftd and phase == MarketPhase.UPTREND_PRESSURE:
+            # Check both SPY and QQQ for FTD from pressure
+            if len(spy_bars) >= 2:
+                spy_pressure_result = self.check_ftd_from_pressure(
+                    'SPY',
+                    spy_bars[-1],
+                    spy_bars[-2],
+                    phase,
+                    total_d_days
+                )
+                if spy_pressure_result.triggered:
+                    ftd_from_pressure = spy_pressure_result
+
+            if not ftd_from_pressure and len(qqq_bars) >= 2:
+                qqq_pressure_result = self.check_ftd_from_pressure(
+                    'QQQ',
+                    qqq_bars[-1],
+                    qqq_bars[-2],
+                    phase,
+                    total_d_days
+                )
+                if qqq_pressure_result.triggered:
+                    ftd_from_pressure = qqq_pressure_result
+
+            # If FTD from pressure triggered, upgrade phase
+            if ftd_from_pressure and ftd_from_pressure.triggered:
+                logger.info(
+                    f"FTD from pressure detected - upgrading from "
+                    f"{phase.value} to CONFIRMED_UPTREND"
+                )
+                # Note: We don't automatically upgrade the phase here
+                # The MarketPhaseManager will handle the transition
+                # based on this signal
+
         # Calculate FTD score adjustment for regime
         ftd_score_adjustment = 0.0
-        
+
         if any_ftd_today:
             ftd_score_adjustment = 0.5  # Significant bullish boost
+        elif ftd_from_pressure and ftd_from_pressure.triggered:
+            # FTD from pressure - moderate bullish boost
+            ftd_score_adjustment = 0.4
         elif any_confirmed_ftd and any_ftd_valid:
             # Confirmed uptrend - moderate boost
             days_since = 0
@@ -532,7 +661,7 @@ class FollowThroughDayTracker:
                 days_since = max(days_since, (date.today() - spy_status.last_ftd_date).days)
             if qqq_status.last_ftd_date:
                 days_since = max(days_since, (date.today() - qqq_status.last_ftd_date).days)
-            
+
             # Boost decays over time
             if days_since <= 5:
                 ftd_score_adjustment = 0.3
@@ -546,7 +675,7 @@ class FollowThroughDayTracker:
         elif any_rally_failed:
             # Rally failed today - negative
             ftd_score_adjustment = -0.3
-        
+
         # Days since last FTD
         days_since_ftd = None
         for status in [spy_status, qqq_status]:
@@ -554,7 +683,7 @@ class FollowThroughDayTracker:
                 days = (date.today() - status.last_ftd_date).days
                 if days_since_ftd is None or days < days_since_ftd:
                     days_since_ftd = days
-        
+
         return MarketPhaseStatus(
             phase=phase,
             spy_status=spy_status,
@@ -562,7 +691,9 @@ class FollowThroughDayTracker:
             any_ftd_today=any_ftd_today,
             any_rally_failed=any_rally_failed,
             days_since_last_ftd=days_since_ftd,
-            ftd_score_adjustment=ftd_score_adjustment
+            ftd_score_adjustment=ftd_score_adjustment,
+            ftd_from_pressure=ftd_from_pressure,
+            rally_failed_today=any_rally_failed
         )
     
     def get_ftd_history(self, symbol: str = None, limit: int = 10) -> List[Dict]:

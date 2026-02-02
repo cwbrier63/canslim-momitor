@@ -65,6 +65,15 @@ COLUMN_TYPES = {
     'hard_stop_pct': 'float',
     'stop_price': 'float',
     'health_score': 'int',
+    # Closed position fields
+    'close_price': 'float',
+    'close_date': 'date',
+    'close_reason': 'text',
+    'realized_pnl_pct': 'float',
+    # State -1.5 (WATCHING_EXITED) fields
+    'original_pivot': 'float',
+    'ma_test_count': 'int',
+    'watching_exited_since': 'date',
     'notes': 'text',
 }
 
@@ -941,6 +950,15 @@ class PositionTableModel(QAbstractTableModel):
         ('hard_stop_pct', 'Stop %'),        # Hard stop percentage
         ('stop_price', 'Stop $'),           # Calculated stop price
         ('health_score', 'Health'),         # Position health score
+        # Closed position fields
+        ('close_price', 'Close $'),         # Price when closed
+        ('close_date', 'Close Date'),       # Date position was closed
+        ('close_reason', 'Close Reason'),   # Reason for closing
+        ('realized_pnl_pct', 'Real %'),     # Realized P&L percentage
+        # State -1.5 (WATCHING_EXITED) fields
+        ('original_pivot', 'Orig Pivot'),   # Preserved pivot for retest detection
+        ('ma_test_count', 'MA Tests'),      # Number of MA bounce tests (max 3)
+        ('watching_exited_since', 'Watch Exit'),  # When entered State -1.5
         ('notes', 'Notes'),                 # Position notes
     ]
     
@@ -988,15 +1006,15 @@ class PositionTableModel(QAbstractTableModel):
             if col_key == 'state':
                 state_info = STATES.get(value)
                 return state_info.display_name if state_info else str(value)
-            elif col_key in ('pivot', 'last_price', 'avg_cost', 'stop_price'):
+            elif col_key in ('pivot', 'last_price', 'avg_cost', 'stop_price', 'close_price', 'original_pivot'):
                 return f"${value:.2f}" if value else ""
-            elif col_key in ('dist_from_pivot', 'unrealized_pct', 'base_depth', 'hard_stop_pct', 'prior_uptrend'):
+            elif col_key in ('dist_from_pivot', 'unrealized_pct', 'realized_pnl_pct', 'base_depth', 'hard_stop_pct', 'prior_uptrend'):
                 return f"{value:+.1f}%" if value is not None else ""
             elif col_key in ('unrealized_pnl', 'realized_pnl', 'total_pnl'):
                 return f"${value:+,.2f}" if value is not None else ""
             elif col_key == 'ud_vol_ratio':
                 return f"{value:.2f}" if value is not None else ""
-            elif col_key in ('watch_date', 'breakout_date', 'entry_date', 'earnings_date'):
+            elif col_key in ('watch_date', 'breakout_date', 'entry_date', 'earnings_date', 'close_date', 'watching_exited_since'):
                 if isinstance(value, (date, datetime)):
                     return value.strftime('%Y-%m-%d')
                 return str(value) if value else ""
@@ -1012,18 +1030,20 @@ class PositionTableModel(QAbstractTableModel):
         elif role == Qt.ItemDataRole.BackgroundRole:
             state = row_data.get('state', 0)
             if state == -2:
-                return QBrush(QColor(80, 45, 45))
+                return QBrush(QColor(80, 45, 45))       # Red - stopped out
+            elif state == -1.5:
+                return QBrush(QColor(75, 45, 85))       # Purple - watching exited
             elif state == -1:
-                return QBrush(QColor(85, 65, 40))
+                return QBrush(QColor(85, 65, 40))       # Amber - failed setup
             elif state == 0:
-                return QBrush(QColor(45, 55, 75))
+                return QBrush(QColor(45, 55, 75))       # Blue - watching
             elif state >= 1:
-                return QBrush(QColor(45, 75, 55))
+                return QBrush(QColor(45, 75, 55))       # Green - in position
         
         elif role == Qt.ItemDataRole.ForegroundRole:
             # Color all P&L and distance columns
-            if col_key in ('dist_from_pivot', 'unrealized_pct', 'unrealized_pnl', 
-                          'realized_pnl', 'total_pnl') and value is not None:
+            if col_key in ('dist_from_pivot', 'unrealized_pct', 'unrealized_pnl',
+                          'realized_pnl', 'realized_pnl_pct', 'total_pnl') and value is not None:
                 if value > 0:
                     return QBrush(QColor(80, 220, 100))  # Green
                 elif value < 0:
@@ -1032,11 +1052,12 @@ class PositionTableModel(QAbstractTableModel):
         elif role == Qt.ItemDataRole.TextAlignmentRole:
             if col_key in ('pivot', 'last_price', 'avg_cost', 'stop_price',
                           'dist_from_pivot', 'unrealized_pct', 'unrealized_pnl',
-                          'realized_pnl', 'total_pnl',
+                          'realized_pnl', 'realized_pnl_pct', 'total_pnl',
                           'rs_rating', 'rs_3mo', 'rs_6mo', 'eps_rating', 'comp_rating',
                           'industry_rank', 'base_depth', 'base_length', 'fund_count',
                           'funds_qtr_chg', 'entry_score', 'total_shares',
-                          'ud_vol_ratio', 'prior_uptrend', 'hard_stop_pct', 'health_score'):
+                          'ud_vol_ratio', 'prior_uptrend', 'hard_stop_pct', 'health_score',
+                          'close_price', 'original_pivot', 'ma_test_count'):
                 return Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
         
         elif role == Qt.ItemDataRole.UserRole:
@@ -1067,8 +1088,8 @@ class AdvancedFilterProxyModel(QSortFilterProxyModel):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._filters: Dict[int, Any] = {}
-        self._state_filter: Optional[int] = None
-    
+        self._state_filter: Optional[float] = None  # float to support -1.5
+
     def set_column_filter(self, column: int, filter_value):
         """Set filter for a column. None to clear."""
         if filter_value is None:
@@ -1077,8 +1098,8 @@ class AdvancedFilterProxyModel(QSortFilterProxyModel):
         else:
             self._filters[column] = filter_value
         self.invalidateFilter()
-    
-    def set_state_filter(self, state: Optional[int]):
+
+    def set_state_filter(self, state: Optional[float]):
         self._state_filter = state
         self.invalidateFilter()
     
@@ -1189,7 +1210,10 @@ class PositionTableView(QDialog):
         70, 60, 85, 100, 70, 75, 55, 60, 75, 70, 75,  # Symbol through Total $
         40, 50, 50, 40, 50, 45, 45, 60, 50, 60, 50,   # RS through Length
         55, 60, 55, 65, 50, 50, 85, 85, 85, 85,       # U/D Vol through Earnings
-        55, 75, 55, 70, 50, 120                        # Shares through Notes
+        55, 75, 55, 70, 50,                            # Shares through Health
+        70, 85, 90, 55,                                # Close$, CloseDate, CloseReason, Real%
+        75, 60, 85,                                    # OrigPivot, MATsts, WatchExit (State -1.5)
+        120                                            # Notes
     ]
 
     def __init__(self, db_session, parent=None, config_path: str = None):
@@ -1344,6 +1368,7 @@ class PositionTableView(QDialog):
         self.state_filter_combo.addItem("💰 In Position (2)", 2)
         self.state_filter_combo.addItem("📈 Pyramiding (3)", 3)
         self.state_filter_combo.addItem("⚠️ Failed Setup (-1)", -1)
+        self.state_filter_combo.addItem("👁️ Exited Watch (-1.5)", -1.5)
         self.state_filter_combo.addItem("🛑 Stopped Out (-2)", -2)
         self.state_filter_combo.currentIndexChanged.connect(self._on_state_filter_changed)
         state_layout.addRow("State:", self.state_filter_combo)
@@ -1614,6 +1639,10 @@ class PositionTableView(QDialog):
                     'close_price': getattr(pos, 'close_price', None),
                     'close_date': getattr(pos, 'close_date', None),
                     'close_reason': getattr(pos, 'close_reason', None),
+                    # State -1.5 (WATCHING_EXITED) fields
+                    'original_pivot': getattr(pos, 'original_pivot', None),
+                    'ma_test_count': getattr(pos, 'ma_test_count', None),
+                    'watching_exited_since': getattr(pos, 'watching_exited_since', None),
                 }
                 position_data.append(data)
                 self._position_id_map[i] = pos.id

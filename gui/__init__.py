@@ -45,8 +45,10 @@ def get_kanban_column():
 
 def get_dialogs():
     """Import dialogs (requires PyQt6)."""
-    from canslim_monitor.gui.transition_dialogs import TransitionDialog, AddPositionDialog
-    return TransitionDialog, AddPositionDialog
+    from canslim_monitor.gui.transition_dialogs import (
+        TransitionDialog, AddPositionDialog, ExitToReentryWatchDialog
+    )
+    return TransitionDialog, AddPositionDialog, ExitToReentryWatchDialog
 
 
 def get_main_window():

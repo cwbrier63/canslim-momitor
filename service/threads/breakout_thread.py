@@ -161,7 +161,11 @@ class BreakoutThread(BaseThread):
         # max_extended_pct: Filter out EXTENDED alerts beyond this % from pivot
         # Set to 0 to disable extended alerts entirely, or high value (e.g., 100) to allow all
         self.max_extended_pct = self.config.get('max_extended_pct', 7.0)
-        
+
+        # min_avg_volume: Minimum 50-day average volume for alerts (IBD standard is 400K-500K)
+        # Set to 0 to disable filter, or 500000 for IBD-compliant liquidity
+        self.min_avg_volume = self.config.get('min_avg_volume', 0)
+
         # min_alert_grade: Only send alerts for setups with this grade or better
         # Valid grades: A, B, C, D, F (A is best) - also handles +/- modifiers
         # Set to 'F' to allow all, 'C' to filter out D and F grades
@@ -310,24 +314,60 @@ class BreakoutThread(BaseThread):
         if not price_data:
             self.logger.debug(f"{symbol}: No price data available")
             return None
-        
+
         current_price = price_data.get('last', 0)
         if current_price <= 0:
             return None
-        
+
         volume = price_data.get('volume', 0)
         high = price_data.get('high', current_price)
         low = price_data.get('low', current_price)
-        
-        # 2. Get average volume - prefer stored 50d avg from Polygon, fallback to IBKR
+
+        # 2. Get average volume FIRST (needed for validity check)
         avg_volume = getattr(pos, 'avg_volume_50d', None)
         if not avg_volume or avg_volume <= 0:
-            # Fallback to IBKR avg_volume (often unreliable)
             avg_volume = price_data.get('avg_volume', 0)
         if not avg_volume or avg_volume <= 0:
-            # Last resort: use reasonable default
-            avg_volume = 500000
-        
+            avg_volume = 500000  # Default
+
+        # 1b. Check if IBKR volume seems valid by comparing to expected volume at this time
+        # IBKR snapshot mode often returns 0 or garbage values
+        volume_available = price_data.get('volume_available', False)
+
+        # Calculate expected volume at this time of day (rough estimate)
+        et_tz = pytz.timezone('America/New_York')
+        now_et = datetime.now(et_tz)
+        market_open = now_et.replace(hour=9, minute=30, second=0, microsecond=0)
+        if now_et > market_open:
+            elapsed_minutes = (now_et - market_open).total_seconds() / 60
+            day_fraction = min(elapsed_minutes / 390, 1.0)
+            expected_volume = avg_volume * day_fraction
+        else:
+            expected_volume = avg_volume * 0.1  # Pre-market: expect 10%
+
+        # Volume is suspect if it's less than 5% of expected, or below 1000 shares
+        volume_seems_invalid = (
+            not volume_available or
+            volume < 1000 or
+            (expected_volume > 10000 and volume < expected_volume * 0.05)
+        )
+
+        if volume_seems_invalid and self.volume_service:
+            self.logger.info(f"{symbol}: IBKR volume={volume:,} (expected ~{int(expected_volume):,}), trying Massive...")
+            intraday = self._get_intraday_volume_fallback(symbol)
+            if intraday and intraday.get('cumulative_volume', 0) > volume:
+                volume = intraday.get('cumulative_volume', 0)
+                # Also use Massive data for high/low if available
+                if intraday.get('high', 0) > 0:
+                    high = intraday['high']
+                if intraday.get('low', 0) > 0 and intraday.get('low') != float('inf'):
+                    low = intraday['low']
+                self.logger.info(f"{symbol}: Using Massive volume={volume:,} (bars={intraday.get('bars_count', 0)})")
+            else:
+                self.logger.debug(f"{symbol}: Massive returned no improvement")
+        elif volume_seems_invalid:
+            self.logger.warning(f"{symbol}: IBKR volume={volume:,} (suspect), no volume_service")
+
         # 3. Calculate metrics
         distance_pct = ((current_price - pivot) / pivot) * 100
         
@@ -443,13 +483,21 @@ class BreakoutThread(BaseThread):
     ) -> bool:
         """
         Create a breakout alert with full scoring and sizing.
-        
+
         Returns True if alert was created successfully.
         """
         symbol = pos.symbol
         current_price = price_data.get('last', 0)
         pivot = pos.pivot
-        
+
+        # Filter: Check minimum average volume (IBD liquidity requirement)
+        avg_volume = getattr(pos, 'avg_volume_50d', 0) or 0
+        if self.min_avg_volume > 0 and avg_volume < self.min_avg_volume:
+            self.logger.debug(
+                f"{symbol}: Alert filtered - avg volume {avg_volume:,} < min {self.min_avg_volume:,}"
+            )
+            return False
+
         # Get market regime for scoring adjustments
         market_regime = self._market_regime_cache or "UNKNOWN"
         
@@ -658,19 +706,28 @@ class BreakoutThread(BaseThread):
         else:
             stage_display = str(stage) if stage else "?"
         
-        # Volume display - show actual values to aid decision making
+        # Volume display - show RVOL and average volume for validation
         volume_available = price_data.get('volume_available', False)
         raw_volume = price_data.get('volume', 0)
-        
+        avg_vol = getattr(pos, 'avg_volume_50d', 0) or 0
+
+        # Format average volume (K for thousands, M for millions)
+        def format_volume(vol):
+            if vol >= 1_000_000:
+                return f"{vol/1_000_000:.1f}M"
+            elif vol >= 1_000:
+                return f"{vol/1_000:.0f}K"
+            else:
+                return str(vol)
+
+        avg_vol_str = format_volume(avg_vol) if avg_vol > 0 else "?"
+
         if not volume_available or raw_volume == 0:
-            # IBKR didn't return volume data
-            vol_str = "N/A"
+            vol_str = f"N/A | Avg {avg_vol_str}"
         elif volume_ratio < 0.01:
-            # Volume is extremely low relative to average
-            vol_str = f"0.0x ({raw_volume:,})"
+            vol_str = f"0.0x | Avg {avg_vol_str}"
         else:
-            # Normal case - show RVOL ratio
-            vol_str = f"{volume_ratio:.1f}x"
+            vol_str = f"{volume_ratio:.1f}x | Avg {avg_vol_str}"
         
         # Determine color and title based on subtype
         if subtype == AlertSubtype.CONFIRMED:
@@ -931,7 +988,47 @@ class BreakoutThread(BaseThread):
         except Exception as e:
             self.logger.debug(f"Could not get price data for {symbol}: {e}")
             return None
-    
+
+    def _get_intraday_volume_fallback(self, symbol: str) -> Optional[Dict]:
+        """
+        Get intraday volume from Massive/Polygon when IBKR returns 0.
+
+        Uses minute aggregates (15-min delayed with Stocks Starter tier).
+
+        Args:
+            symbol: Stock symbol
+
+        Returns:
+            Dict with cumulative_volume, high, low, etc. or None
+        """
+        if not self.volume_service:
+            self.logger.debug(f"{symbol}: No volume_service available")
+            return None
+
+        if not hasattr(self.volume_service, 'polygon_client'):
+            self.logger.debug(f"{symbol}: volume_service has no polygon_client attribute")
+            return None
+
+        try:
+            polygon_client = self.volume_service.polygon_client
+            if not polygon_client:
+                self.logger.debug(f"{symbol}: polygon_client is None")
+                return None
+
+            # Use the new intraday endpoint
+            if hasattr(polygon_client, 'get_intraday_volume'):
+                result = polygon_client.get_intraday_volume(symbol)
+                if result:
+                    self.logger.debug(f"{symbol}: Got intraday data: {result.get('cumulative_volume', 0):,} volume")
+                return result
+            else:
+                self.logger.warning(f"{symbol}: polygon_client missing get_intraday_volume method")
+
+        except Exception as e:
+            self.logger.error(f"{symbol}: Intraday volume fallback failed: {e}", exc_info=True)
+
+        return None
+
     def _calculate_rvol(self, current_volume: int, avg_daily_volume: int) -> float:
         """
         Calculate Relative Volume (RVOL) - time-adjusted volume ratio.
@@ -1102,12 +1199,14 @@ class BreakoutThread(BaseThread):
         stats = super().get_stats()
         stats.update({
             'volume_threshold_confirmed': self.volume_threshold_confirmed,
-            'volume_threshold_minimum': self.volume_threshold_minimum,
+            'volume_threshold_buy_zone': self.volume_threshold_buy_zone,
+            'volume_threshold_approaching': self.volume_threshold_approaching,
             'buy_zone_max_pct': self.buy_zone_max_pct,
             'market_regime': self._market_regime_cache,
             'suppress_in_correction': self.suppress_in_correction,
             'has_scoring_engine': self.scoring_engine is not None,
             'has_position_sizer': self.position_sizer is not None,
             'has_alert_service': self.alert_service is not None,
+            'has_volume_service': self.volume_service is not None,
         })
         return stats

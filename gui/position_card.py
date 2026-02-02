@@ -67,7 +67,12 @@ class PositionCard(QFrame):
         self.entry_grade = entry_grade
         self.entry_score = entry_score
         self.latest_alert = latest_alert  # NEW
-        
+
+        # Labels that need incremental updates (stored for performance)
+        self._price_label = None
+        self._pnl_label = None
+        self._current_label = None  # For watching state
+
         self._setup_ui()
         self._apply_style()
         
@@ -161,12 +166,12 @@ class PositionCard(QFrame):
                 pivot_label = QLabel(f"Pivot: ${self.pivot:.2f}")
                 pivot_label.setStyleSheet("color: #333; font-size: 10px;")
                 price_row.addWidget(pivot_label)
-            
-            if self.last_price:
-                current_label = QLabel(f"Now: ${self.last_price:.2f}")
-                current_label.setStyleSheet("color: #17A2B8; font-size: 10px;")
-                price_row.addWidget(current_label)
-            
+
+            # Current price label (stored for incremental updates)
+            self._current_label = QLabel(f"Now: ${self.last_price:.2f}" if self.last_price else "Now: --")
+            self._current_label.setStyleSheet("color: #17A2B8; font-size: 10px;")
+            price_row.addWidget(self._current_label)
+
             price_row.addStretch()
             layout.addLayout(price_row)
             
@@ -184,24 +189,24 @@ class PositionCard(QFrame):
         else:  # In position (state > 0)
             # Price row: Current price and P&L
             price_row = QHBoxLayout()
-            
-            if self.last_price:
-                price_label = QLabel(f"${self.last_price:.2f}")
-                price_label.setStyleSheet("font-weight: bold;")
-                price_row.addWidget(price_label)
-            
-            if self.pnl_pct is not None:
-                pnl_label = QLabel(f"{self.pnl_pct:+.1f}%")
-                pnl_label.setStyleSheet(self._get_pnl_style())
-                price_row.addWidget(pnl_label)
-            
+
+            # Price label (stored for incremental updates)
+            self._price_label = QLabel(f"${self.last_price:.2f}" if self.last_price else "--")
+            self._price_label.setStyleSheet("font-weight: bold;")
+            price_row.addWidget(self._price_label)
+
+            # P&L label (stored for incremental updates)
+            self._pnl_label = QLabel(f"{self.pnl_pct:+.1f}%" if self.pnl_pct is not None else "--")
+            self._pnl_label.setStyleSheet(self._get_pnl_style())
+            price_row.addWidget(self._pnl_label)
+
             price_row.addStretch()
-            
+
             if self.total_shares and self.total_shares > 0:
                 shares_label = QLabel(f"{int(self.total_shares)} sh")
                 shares_label.setStyleSheet("color: #888; font-size: 9px;")
                 price_row.addWidget(shares_label)
-            
+
             layout.addLayout(price_row)
             
             # Cost basis row
@@ -249,7 +254,26 @@ class PositionCard(QFrame):
                 border-color: {border_color};
             }}
         """)
-    
+
+    def update_price(self, new_price: float, new_pnl_pct: float = None):
+        """
+        Update price display without rebuilding the entire card.
+        This is much more efficient than recreating the card.
+        """
+        self.last_price = new_price
+        if new_pnl_pct is not None:
+            self.pnl_pct = new_pnl_pct
+
+        if self.state == 0:  # Watching
+            if self._current_label and new_price:
+                self._current_label.setText(f"Now: ${new_price:.2f}")
+        else:  # In position
+            if self._price_label and new_price:
+                self._price_label.setText(f"${new_price:.2f}")
+            if self._pnl_label and new_pnl_pct is not None:
+                self._pnl_label.setText(f"{new_pnl_pct:+.1f}%")
+                self._pnl_label.setStyleSheet(self._get_pnl_style())
+
     def _get_rs_style(self) -> str:
         """Get RS rating badge style."""
         if self.rs_rating >= 90:

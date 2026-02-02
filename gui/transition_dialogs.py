@@ -18,7 +18,7 @@ from PyQt6.QtGui import QFont
 from canslim_monitor.gui.state_config import (
     STATES, StateTransition, get_transition,
     VALID_PATTERNS, AD_RATINGS, BASE_STAGES, EXIT_REASONS, TRADE_OUTCOMES,
-    SMR_RATINGS, MARKET_EXPOSURE_LEVELS
+    SMR_RATINGS, MARKET_EXPOSURE_LEVELS, REENTRY_WATCH_REASONS
 )
 
 
@@ -215,13 +215,13 @@ class TransitionDialog(QDialog):
             return label, container
         
         # Price fields
-        if field in ('e1_price', 'e2_price', 'e3_price', 'tp1_price', 'tp2_price', 'stop_price', 'exit_price'):
+        if field in ('e1_price', 'e2_price', 'e3_price', 'tp1_price', 'tp2_price', 'stop_price', 'exit_price', 'close_price'):
             label = self._get_field_label(field)
             
             # Create container for price fields that need context info
             avg_cost = self.current_data.get('avg_cost', 0)
             last_price = self.current_data.get('last_price', 0)
-            needs_context = (field == 'exit_price' and avg_cost) or field in ('e2_price', 'e3_price')
+            needs_context = (field in ('exit_price', 'close_price') and avg_cost) or field in ('e2_price', 'e3_price')
             
             if needs_context:
                 container = QWidget()
@@ -241,7 +241,7 @@ class TransitionDialog(QDialog):
                     widget.setValue(float(last_price))
                 
                 # Show context info
-                if field == 'exit_price' and avg_cost:
+                if field in ('exit_price', 'close_price') and avg_cost:
                     cost_label = QLabel(f"(Avg cost: ${avg_cost:.2f})")
                     cost_label.setStyleSheet("color: #666; font-style: italic;")
                     h_layout.addWidget(cost_label)
@@ -269,19 +269,19 @@ class TransitionDialog(QDialog):
                     pivot = self.current_data.get('pivot', 0)
                     if pivot:
                         widget.setValue(pivot * 0.93)
-                elif field == 'exit_price' and 'last_price' in self.current_data:
-                    # Default exit price to last known price
+                elif field in ('exit_price', 'close_price') and 'last_price' in self.current_data:
+                    # Default exit/close price to last known price
                     last = self.current_data.get('last_price', 0)
                     if last:
                         widget.setValue(float(last))
                 return label, widget
         
         # Date fields
-        if field in ('entry_date', 'breakout_date', 'tp1_date', 'tp2_date', 'exit_date'):
+        if field in ('entry_date', 'breakout_date', 'tp1_date', 'tp2_date', 'exit_date', 'close_date'):
             label = self._get_field_label(field)
             widget = QDateEdit()
             widget.setCalendarPopup(True)
-            widget.setDate(QDate.currentDate())
+            widget.setDate(QDate.currentDate())  # Default to today
             if field in self.current_data and self.current_data[field]:
                 d = self.current_data[field]
                 if isinstance(d, date):
@@ -298,6 +298,23 @@ class TransitionDialog(QDialog):
                 idx = widget.findText('STOP_HIT')
                 if idx >= 0:
                     widget.setCurrentIndex(idx)
+            return label, widget
+
+        # Close reason dropdown - use REENTRY_WATCH_REASONS for State -1.5
+        if field == 'close_reason':
+            label = self._get_field_label(field)
+            widget = QComboBox()
+            if self.to_state == -1.5:  # Re-entry watch
+                widget.addItems(REENTRY_WATCH_REASONS)
+                widget.setToolTip(
+                    "STOP_HIT: Hard stop was hit\n"
+                    "50MA_BREAKDOWN: Closed below 50-day moving average\n"
+                    "10WMA_BREAKDOWN: Closed below 10-week moving average\n"
+                    "MARKET_CORRECTION: Exiting due to market correction"
+                )
+            else:
+                # For other transitions, use general exit reasons
+                widget.addItems([''] + EXIT_REASONS)
             return label, widget
         
         # Trade outcome dropdown
@@ -352,6 +369,9 @@ class TransitionDialog(QDialog):
             'exit_reason': 'Exit Reason:',
             'trade_outcome': 'Trade Outcome:',
             'notes': 'Notes:',
+            'close_date': 'Close Date:',
+            'close_price': 'Close Price:',
+            'close_reason': 'Close Reason:',
         }
         return labels.get(field, f"{field.replace('_', ' ').title()}:")
     
@@ -1710,6 +1730,9 @@ class EditPositionDialog(QDialog):
         """
         Calculate P&L values based on entries, exits, and close price.
 
+        Calculates realized P&L only on shares actually sold, using avg cost basis.
+        This prevents misleading P&L when position is only partially closed.
+
         Returns:
             Tuple of (pnl_pct, pnl_dollar) or (None, None) if can't calculate
         """
@@ -1728,7 +1751,7 @@ class EditPositionDialog(QDialog):
         tp2_price = self.tp2_price_input.value()
         close_price = self.close_price_input.value()
 
-        # Calculate total entry cost
+        # Calculate total entry cost and avg cost
         total_shares = e1_shares + e2_shares + e3_shares
         total_cost = (e1_shares * e1_price) + (e2_shares * e2_price) + (e3_shares * e3_price)
 
@@ -1737,30 +1760,41 @@ class EditPositionDialog(QDialog):
 
         avg_cost = total_cost / total_shares
 
-        # Calculate total exit proceeds
-        # Partial exits at TP1/TP2 + remaining shares at close price
-        shares_remaining = total_shares - tp1_sold - tp2_sold
-        if shares_remaining < 0:
-            shares_remaining = 0
+        # Calculate shares remaining after partial takes
+        shares_after_tp = total_shares - tp1_sold - tp2_sold
+        if shares_after_tp < 0:
+            shares_after_tp = 0
 
+        # Calculate proceeds and shares sold for each exit type
         total_proceeds = 0
+        shares_sold = 0
+
         if tp1_sold > 0 and tp1_price > 0:
             total_proceeds += tp1_sold * tp1_price
+            shares_sold += tp1_sold
+
         if tp2_sold > 0 and tp2_price > 0:
             total_proceeds += tp2_sold * tp2_price
-        if shares_remaining > 0 and close_price > 0:
-            total_proceeds += shares_remaining * close_price
+            shares_sold += tp2_sold
 
-        if total_proceeds <= 0:
-            # Use close_price for all shares if no exits recorded
+        # Add remaining shares at close price (if position fully closed)
+        if shares_after_tp > 0 and close_price > 0:
+            total_proceeds += shares_after_tp * close_price
+            shares_sold += shares_after_tp
+
+        # If no shares sold yet, check if close_price is set for full position
+        if shares_sold == 0:
             if close_price > 0:
+                # Full position closed at close_price
                 total_proceeds = total_shares * close_price
+                shares_sold = total_shares
             else:
                 return None, None
 
-        # Calculate P&L
-        pnl_dollar = total_proceeds - total_cost
-        pnl_pct = ((total_proceeds - total_cost) / total_cost) * 100
+        # Calculate P&L based on shares actually sold using avg cost basis
+        cost_of_shares_sold = shares_sold * avg_cost
+        pnl_dollar = total_proceeds - cost_of_shares_sold
+        pnl_pct = ((total_proceeds - cost_of_shares_sold) / cost_of_shares_sold) * 100
 
         return pnl_pct, pnl_dollar
 
@@ -1849,4 +1883,194 @@ class EditPositionDialog(QDialog):
     
     def get_result(self) -> Dict[str, Any]:
         """Get the updated data."""
+        return self.result_data
+
+
+class ExitToReentryWatchDialog(QDialog):
+    """
+    Dialog for exiting a position to State -1.5 (WATCHING_EXITED).
+
+    Collects exit price and reason, then monitors for MA bounce or pivot retest
+    re-entry opportunities.
+    """
+
+    def __init__(
+        self,
+        symbol: str,
+        current_data: Dict[str, Any],
+        parent=None
+    ):
+        super().__init__(parent)
+        self.symbol = symbol
+        self.current_data = current_data or {}
+        self.result_data: Dict[str, Any] = {}
+
+        self._setup_ui()
+
+    def _setup_ui(self):
+        """Set up the dialog UI."""
+        self.setWindowTitle(f"Exit to Re-entry Watch: {self.symbol}")
+        self.setMinimumWidth(450)
+
+        layout = QVBoxLayout(self)
+        layout.setSpacing(12)
+
+        # Header
+        header = QLabel(f"👁️ {self.symbol}: Exit to Re-entry Watch")
+        header_font = QFont()
+        header_font.setBold(True)
+        header_font.setPointSize(14)
+        header.setFont(header_font)
+        header.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(header)
+
+        # Description
+        desc = QLabel(
+            "Exit this position but continue monitoring for re-entry opportunity.\n"
+            "The system will watch for MA bounces and pivot retests."
+        )
+        desc.setStyleSheet("color: #666; font-style: italic;")
+        desc.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        desc.setWordWrap(True)
+        layout.addWidget(desc)
+
+        # Separator
+        line = QFrame()
+        line.setFrameShape(QFrame.Shape.HLine)
+        line.setFrameShadow(QFrame.Shadow.Sunken)
+        layout.addWidget(line)
+
+        # Current position info
+        info_group = QGroupBox("Current Position")
+        info_layout = QFormLayout()
+
+        # Show current position details
+        shares = self.current_data.get('total_shares', 0)
+        avg_cost = self.current_data.get('avg_cost', 0)
+        last_price = self.current_data.get('last_price', 0)
+        pivot = self.current_data.get('pivot', 0)
+
+        if shares:
+            info_layout.addRow("Shares:", QLabel(f"{shares:,}"))
+        if avg_cost:
+            info_layout.addRow("Avg Cost:", QLabel(f"${avg_cost:.2f}"))
+        if last_price:
+            info_layout.addRow("Current Price:", QLabel(f"${last_price:.2f}"))
+        if pivot:
+            info_layout.addRow("Pivot:", QLabel(f"${pivot:.2f}"))
+
+        # Calculate current P&L
+        if avg_cost and last_price and shares:
+            pnl_pct = ((last_price - avg_cost) / avg_cost) * 100
+            pnl_dollar = (last_price - avg_cost) * shares
+            pnl_color = "#28A745" if pnl_pct >= 0 else "#DC3545"
+            pnl_label = QLabel(f"${pnl_dollar:+,.2f} ({pnl_pct:+.1f}%)")
+            pnl_label.setStyleSheet(f"color: {pnl_color}; font-weight: bold;")
+            info_layout.addRow("Unrealized P&L:", pnl_label)
+
+        info_group.setLayout(info_layout)
+        layout.addWidget(info_group)
+
+        # Exit details
+        exit_group = QGroupBox("Exit Details")
+        exit_layout = QFormLayout()
+
+        # Exit price
+        self.exit_price_input = QDoubleSpinBox()
+        self.exit_price_input.setRange(0.01, 99999.99)
+        self.exit_price_input.setDecimals(2)
+        self.exit_price_input.setPrefix("$")
+        self.exit_price_input.setSingleStep(0.10)
+        # Default to current price
+        if last_price:
+            self.exit_price_input.setValue(last_price)
+        exit_layout.addRow("Exit Price:", self.exit_price_input)
+
+        # Exit reason - only show re-entry watch reasons
+        self.exit_reason_combo = QComboBox()
+        self.exit_reason_combo.addItems(REENTRY_WATCH_REASONS)
+        # Add tooltip explaining each reason
+        self.exit_reason_combo.setToolTip(
+            "STOP_HIT: Hard stop was hit\n"
+            "50MA_BREAKDOWN: Closed below 50-day moving average\n"
+            "10WMA_BREAKDOWN: Closed below 10-week moving average\n"
+            "MARKET_CORRECTION: Exiting due to market correction"
+        )
+        exit_layout.addRow("Exit Reason:", self.exit_reason_combo)
+
+        # Notes
+        self.notes_input = QTextEdit()
+        self.notes_input.setMaximumHeight(60)
+        self.notes_input.setPlaceholderText("Optional notes about the exit...")
+        exit_layout.addRow("Notes:", self.notes_input)
+
+        exit_group.setLayout(exit_layout)
+        layout.addWidget(exit_group)
+
+        # What happens next
+        next_group = QGroupBox("What Happens Next")
+        next_layout = QVBoxLayout()
+
+        next_info = QLabel(
+            "• Position will move to 'Exited Watch' state (-1.5)\n"
+            "• Original pivot preserved for retest detection\n"
+            "• System monitors for MA bounce or pivot retest\n"
+            "• After 60 days without re-entry, auto-archives to 'Stopped Out'"
+        )
+        next_info.setStyleSheet("color: #666;")
+        next_layout.addWidget(next_info)
+
+        next_group.setLayout(next_layout)
+        layout.addWidget(next_group)
+
+        # Buttons
+        button_layout = QHBoxLayout()
+
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(self.reject)
+        button_layout.addWidget(cancel_btn)
+
+        button_layout.addStretch()
+
+        confirm_btn = QPushButton("👁️ Exit to Re-entry Watch")
+        confirm_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #9C27B0;
+                color: white;
+                padding: 8px 16px;
+                font-weight: bold;
+                border-radius: 4px;
+            }
+            QPushButton:hover {
+                background-color: #7B1FA2;
+            }
+        """)
+        confirm_btn.clicked.connect(self._on_confirm)
+        button_layout.addWidget(confirm_btn)
+
+        layout.addLayout(button_layout)
+
+    def _on_confirm(self):
+        """Validate and accept the dialog."""
+        exit_price = self.exit_price_input.value()
+        exit_reason = self.exit_reason_combo.currentText()
+
+        if exit_price <= 0:
+            QMessageBox.warning(self, "Invalid Input", "Please enter a valid exit price.")
+            return
+
+        if not exit_reason:
+            QMessageBox.warning(self, "Invalid Input", "Please select an exit reason.")
+            return
+
+        self.result_data = {
+            'exit_price': exit_price,
+            'exit_reason': exit_reason,
+            'notes': self.notes_input.toPlainText() or None,
+        }
+
+        self.accept()
+
+    def get_result(self) -> Dict[str, Any]:
+        """Get the dialog result."""
         return self.result_data

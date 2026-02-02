@@ -204,20 +204,23 @@ class AlertCheckDialog(QDialog):
         tech_data = self.check_summary.get('technical_data', {})
         current_price = self.position_summary.get('current_price', 0)
 
-        # Single breakout checker status
+        # Checker status row - Breakout + Alt Entry
         checkers_layout = QHBoxLayout()
         checkers_layout.setSpacing(15)
 
-        checker_frame = QFrame()
-        checker_layout = QHBoxLayout(checker_frame)
-        checker_layout.setContentsMargins(5, 2, 5, 2)
-        checker_layout.setSpacing(3)
+        # Separate alerts by type
+        breakout_alerts = [a for a in self.alerts if a.get('alert_type', '').upper() == 'BREAKOUT']
+        alt_entry_alerts = [a for a in self.alerts if a.get('alert_type', '').upper() == 'ALT_ENTRY']
+
+        # --- Breakout Checker ---
+        breakout_frame = QFrame()
+        breakout_layout = QHBoxLayout(breakout_frame)
+        breakout_layout.setContentsMargins(5, 2, 5, 2)
+        breakout_layout.setSpacing(3)
 
         # Determine breakout status from alerts
-        has_alerts = len(self.alerts) > 0
-        if has_alerts:
-            # Check alert subtype for color
-            subtype = self.alerts[0].get('subtype', '') if self.alerts else ''
+        if breakout_alerts:
+            subtype = breakout_alerts[0].get('subtype', '')
             if subtype in ('CONFIRMED', 'IN_BUY_ZONE'):
                 status_icon = "🟢"  # Green - in breakout territory
                 bg_color = "#D4EDDA"
@@ -237,7 +240,7 @@ class AlertCheckDialog(QDialog):
             status_icon = "⚪"
             bg_color = "#F8F9FA"
 
-        checker_frame.setStyleSheet(f"""
+        breakout_frame.setStyleSheet(f"""
             QFrame {{
                 background-color: {bg_color};
                 border-radius: 3px;
@@ -248,15 +251,52 @@ class AlertCheckDialog(QDialog):
         label = QLabel(f"{status_icon} 🎯 Breakout")
         label.setToolTip("Pivot breakout detection: confirmed, buy zone, approaching, extended")
         label.setFont(QFont('Arial', 9))
-        checker_layout.addWidget(label)
+        breakout_layout.addWidget(label)
 
-        if has_alerts:
-            subtype = self.alerts[0].get('subtype', 'CHECKING')
+        if breakout_alerts:
+            subtype = breakout_alerts[0].get('subtype', 'CHECKING')
             status_label = QLabel(f"({subtype.replace('_', ' ')})")
             status_label.setStyleSheet("font-weight: bold;")
-            checker_layout.addWidget(status_label)
+            breakout_layout.addWidget(status_label)
 
-        checkers_layout.addWidget(checker_frame)
+        checkers_layout.addWidget(breakout_frame)
+
+        # --- Alt Entry Checker ---
+        alt_entry_frame = QFrame()
+        alt_entry_layout = QHBoxLayout(alt_entry_frame)
+        alt_entry_layout.setContentsMargins(5, 2, 5, 2)
+        alt_entry_layout.setSpacing(3)
+
+        if alt_entry_alerts:
+            # Alt entry opportunity found
+            alt_status_icon = "🔔"
+            alt_bg_color = "#CCE5FF"  # Blue - opportunity
+        else:
+            # No alt entry (either not extended or no pullback)
+            alt_status_icon = "✅"
+            alt_bg_color = "#D4EDDA"  # Green - checked, no alert
+
+        alt_entry_frame.setStyleSheet(f"""
+            QFrame {{
+                background-color: {alt_bg_color};
+                border-radius: 3px;
+                padding: 2px;
+            }}
+        """)
+
+        alt_label = QLabel(f"{alt_status_icon} 📉 Alt Entry")
+        alt_label.setToolTip("MA pullback opportunities: 21 EMA, 50 MA, pivot retest after extension")
+        alt_label.setFont(QFont('Arial', 9))
+        alt_entry_layout.addWidget(alt_label)
+
+        if alt_entry_alerts:
+            subtype = alt_entry_alerts[0].get('subtype', '')
+            status_text = subtype.replace('_', ' ') if subtype else 'OPPORTUNITY'
+            alt_status_label = QLabel(f"({status_text})")
+            alt_status_label.setStyleSheet("font-weight: bold; color: #004085;")
+            alt_entry_layout.addWidget(alt_status_label)
+
+        checkers_layout.addWidget(alt_entry_frame)
         checkers_layout.addStretch()
         layout.addLayout(checkers_layout)
 
@@ -315,6 +355,49 @@ class AlertCheckDialog(QDialog):
 
             data_layout.addStretch()
             layout.addLayout(data_layout)
+
+        # MA data row (for alt entry checks)
+        ma_21 = tech_data.get('ma_21')
+        ma_50 = tech_data.get('ma_50')
+        ma_200 = tech_data.get('ma_200')
+
+        if ma_21 or ma_50:
+            ma_layout = QHBoxLayout()
+            ma_layout.setSpacing(20)
+
+            ma_label = QLabel("Alt Entry Data:")
+            ma_label.setStyleSheet("font-weight: bold; color: #666;")
+            ma_layout.addWidget(ma_label)
+
+            def ma_label_with_pct(name: str, ma_value: float) -> QLabel:
+                """Create MA label with percentage distance from current price."""
+                if current_price > 0 and ma_value > 0:
+                    pct_diff = ((current_price - ma_value) / ma_value) * 100
+                    pct_color = '#28A745' if pct_diff >= 0 else '#DC3545'
+                    pct_str = f"<span style='color:{pct_color};'>({pct_diff:+.1f}%)</span>"
+                    lbl = QLabel(f"{name}: ${ma_value:.2f} {pct_str}")
+                    lbl.setTextFormat(Qt.TextFormat.RichText)
+                else:
+                    lbl = QLabel(f"{name}: ${ma_value:.2f}")
+                return lbl
+
+            if ma_21:
+                ma_layout.addWidget(ma_label_with_pct("21 EMA", ma_21))
+            if ma_50:
+                ma_layout.addWidget(ma_label_with_pct("50 MA", ma_50))
+            if ma_200:
+                ma_layout.addWidget(ma_label_with_pct("200 MA", ma_200))
+
+            ma_layout.addStretch()
+            layout.addLayout(ma_layout)
+        elif not tech_data.get('ma_21') and not tech_data.get('ma_50'):
+            # No MA data available - show notice
+            no_ma_layout = QHBoxLayout()
+            no_ma_label = QLabel("Alt Entry Data: (No MA data - alt entry alerts unavailable)")
+            no_ma_label.setStyleSheet("color: #999; font-style: italic;")
+            no_ma_layout.addWidget(no_ma_label)
+            no_ma_layout.addStretch()
+            layout.addLayout(no_ma_layout)
 
     def _create_position_checker_summary(self, layout: QVBoxLayout):
         """Create summary panel for position checks (state 1+)."""
@@ -434,6 +517,7 @@ class AlertCheckDialog(QDialog):
             'MA': ['TECHNICAL'],
             'HEALTH': ['HEALTH'],
             'BREAKOUT': ['BREAKOUT'],
+            'ALT_ENTRY': ['ALT_ENTRY'],  # Watchlist MA bounce/pivot retest
         }
         return alert_type in checker_map.get(checker_name, [])
 

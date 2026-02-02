@@ -13,6 +13,11 @@ import logging
 from canslim_monitor.data.models import Position
 from canslim_monitor.services.alert_service import AlertType, AlertSubtype, AlertData
 from canslim_monitor.utils.level_calculator import LevelCalculator
+from canslim_monitor.utils.discord_formatters import (
+    build_stop_warning_embed,
+    build_hard_stop_embed,
+    build_position_embed,
+)
 
 from .base_checker import BaseChecker, PositionContext
 
@@ -93,29 +98,31 @@ class StopChecker(BaseChecker):
         """Check if price hit hard stop."""
         if context.current_price > hard_stop:
             return None
-        
+
         # Always fire hard stop - no cooldown
         loss_pct = context.pnl_pct
         loss_dollars = context.pnl_dollars
-        
-        message = (
-            f"Price: {self.format_price(context.current_price)} "
-            f"(down {self.format_pct(loss_pct)} from entry)\n"
-            f"Entry: {self.format_price(context.entry_price)} | "
-            f"Stop: {self.format_price(hard_stop)}\n"
-            f"Position: {context.shares} shares "
-            f"({self.format_price(context.shares * context.current_price)})\n\n"
-            f"▶ ACTION: SELL FULL POSITION\n"
-            f"   Estimated Loss: {self.format_dollars(loss_dollars)} ({self.format_pct(loss_pct)})\n\n"
-            f"This is a capital protection stop. The 7-8% loss rule is IBD's #1 rule."
+
+        # Build compact embed format
+        message = build_hard_stop_embed(
+            symbol=context.symbol,
+            price=context.current_price,
+            entry_price=context.entry_price,
+            stop_price=hard_stop,
+            pnl_pct=loss_pct,
+            loss_dollars=loss_dollars,
+            ma_21=context.ma_21,
+            ma_50=context.ma_50,
+            days_in_position=context.days_in_position,
+            market_regime=context.market_regime,
         )
-        
+
         return self.create_alert(
             context=context,
             alert_type=AlertType.STOP,
             subtype=AlertSubtype.HARD_STOP,
             message=message,
-            action="SELL FULL POSITION",
+            action="EXIT POSITION",
             priority="P0",
         )
     
@@ -124,34 +131,42 @@ class StopChecker(BaseChecker):
         # Check if trailing stop should be active
         if context.max_gain_pct < self.trailing_activation_pct:
             return None
-        
+
         # Calculate trailing stop from max price
         trailing_stop = context.max_price * (1 - self.trailing_trail_pct / 100)
-        
+
         # Ensure trailing stop is above entry
         trailing_stop = max(trailing_stop, context.entry_price)
-        
+
         if context.current_price > trailing_stop:
             return None
-        
+
         gain_locked = ((trailing_stop - context.entry_price) / context.entry_price) * 100
-        
-        message = (
-            f"🔔 TRAILING STOP TRIGGERED\n\n"
-            f"Price: {self.format_price(context.current_price)}\n"
-            f"Trailing Stop: {self.format_price(trailing_stop)} "
-            f"(8% from max of {self.format_price(context.max_price)})\n"
-            f"Max Gain: {self.format_pct(context.max_gain_pct)}\n"
-            f"Gain Locked: {self.format_pct(gain_locked)}\n\n"
-            f"▶ ACTION: SELL TO LOCK IN PROFITS\n\n"
-            f"Trailing stop activated at +{self.trailing_activation_pct:.0f}% "
-            f"and trailed {self.trailing_trail_pct:.0f}% from high."
+
+        # Build compact embed format
+        line2 = f"Trail Stop: ${trailing_stop:.2f} | Max: ${context.max_price:.2f} (+{context.max_gain_pct:.1f}%)"
+        message = build_position_embed(
+            alert_type='STOP',
+            subtype='TRAILING_STOP',
+            symbol=context.symbol,
+            price=context.current_price,
+            pnl_pct=context.pnl_pct,
+            entry_price=context.entry_price,
+            line2_data=line2,
+            ma_21=context.ma_21,
+            ma_50=context.ma_50,
+            days_in_position=context.days_in_position,
+            max_gain_pct=context.max_gain_pct,
+            action=f"Sell to lock +{gain_locked:.1f}% gain",
+            priority='P0',
+            market_regime=context.market_regime,
+            custom_title=f"TRAILING STOP HIT: {context.symbol}",
         )
-        
+
         return self.create_alert(
             context=context,
             alert_type=AlertType.STOP,
-            subtype=AlertSubtype.TRAILING_STOP,  # Trailing stop distinct from hard stop
+            subtype=AlertSubtype.TRAILING_STOP,
             message=message,
             action="SELL TO LOCK IN PROFITS",
             priority="P0",
@@ -165,32 +180,35 @@ class StopChecker(BaseChecker):
         """Check if price approaching stop."""
         if self.is_on_cooldown(context.symbol, AlertSubtype.WARNING):
             return None
-        
-        # Calculate warning zone
-        warning_stop = context.entry_price * (1 - (abs(context.pnl_pct) + self.warning_buffer_pct) / 100)
+
+        # Calculate distance to stop
         distance_to_stop = ((context.current_price - hard_stop) / context.current_price) * 100
-        
+
         # Only warn if within 2% of stop
         if distance_to_stop > self.warning_buffer_pct:
             return None
-        
-        message = (
-            f"⚠️ APPROACHING STOP LOSS\n\n"
-            f"Price: {self.format_price(context.current_price)} "
-            f"({self.format_pct(context.pnl_pct)})\n"
-            f"Stop: {self.format_price(hard_stop)}\n"
-            f"Distance to Stop: {distance_to_stop:.1f}%\n\n"
-            f"▶ WATCH CLOSELY\n"
-            f"   Consider tightening position or preparing to exit."
+
+        # Build compact embed format
+        message = build_stop_warning_embed(
+            symbol=context.symbol,
+            price=context.current_price,
+            entry_price=context.entry_price,
+            stop_price=hard_stop,
+            distance_pct=distance_to_stop,
+            pnl_pct=context.pnl_pct,
+            ma_21=context.ma_21,
+            ma_50=context.ma_50,
+            days_in_position=context.days_in_position,
+            market_regime=context.market_regime,
         )
-        
+
         self.set_cooldown(context.symbol, AlertSubtype.WARNING)
-        
+
         return self.create_alert(
             context=context,
             alert_type=AlertType.STOP,
             subtype=AlertSubtype.WARNING,
             message=message,
             action="WATCH CLOSELY",
-            priority="P1",
+            priority="P0",
         )

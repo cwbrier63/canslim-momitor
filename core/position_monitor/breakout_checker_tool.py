@@ -4,6 +4,9 @@ Breakout Checker Tool - Run breakout checks without side effects.
 This tool allows running breakout detection against watchlist (State 0) positions
 for status checking purposes. It does NOT store alerts in the database
 or send Discord notifications - purely for display in the GUI.
+
+Also runs WatchlistAltEntryChecker to detect MA pullback opportunities
+on stocks that were previously extended.
 """
 
 from datetime import datetime
@@ -12,8 +15,10 @@ import logging
 import pytz
 
 from canslim_monitor.data.models import Position
-from canslim_monitor.services.alert_service import AlertType, AlertSubtype
+from canslim_monitor.services.alert_service import AlertType, AlertSubtype, AlertData
 from canslim_monitor.utils.pivot_status import calculate_pivot_status, PivotAnalysis
+from canslim_monitor.core.position_monitor.checkers.base_checker import PositionContext
+from canslim_monitor.core.position_monitor.checkers.watchlist_alt_entry_checker import WatchlistAltEntryChecker
 
 
 class BreakoutCheckerTool:
@@ -58,6 +63,13 @@ class BreakoutCheckerTool:
         self.approaching_pct = self.config.get('approaching_pct', self.APPROACHING_PCT)
         self.max_extended_pct = self.config.get('max_extended_pct', 15.0)
 
+        # Initialize WatchlistAltEntryChecker for MA pullback alerts
+        alt_entry_config = self.config.get('alt_entry', {})
+        self.alt_entry_checker = WatchlistAltEntryChecker(
+            config={'alt_entry': alt_entry_config},
+            logger=logging.getLogger('canslim.watchlist_alt_entry_tool')
+        )
+
     def check_position(
         self,
         position: Position,
@@ -67,6 +79,7 @@ class BreakoutCheckerTool:
         high: float = 0,
         low: float = 0,
         market_regime: str = "",
+        technical_data: Dict[str, Any] = None,
     ) -> List[Dict[str, Any]]:
         """
         Run breakout checks against a watchlist position and return alert data.
@@ -79,9 +92,10 @@ class BreakoutCheckerTool:
             high: Today's high
             low: Today's low
             market_regime: Current market regime string
+            technical_data: Dict with MA values (ma_21, ma_50, etc.) for alt entry checks
 
         Returns:
-            List of alert dicts ready for display (usually 0 or 1 alert)
+            List of alert dicts ready for display (breakout status + alt entry opportunities)
         """
         if current_price <= 0:
             self.logger.warning(f"Invalid price for {position.symbol}: {current_price}")
@@ -178,7 +192,99 @@ class BreakoutCheckerTool:
                 pivot_analysis, market_regime, avg_volume
             ))
 
+        # Also check for alternative entry opportunities (MA pullbacks)
+        alt_entry_alerts = self._check_alt_entry(
+            position, current_price, volume_ratio, technical_data
+        )
+        alerts.extend(alt_entry_alerts)
+
         return alerts
+
+    def _check_alt_entry(
+        self,
+        position: Position,
+        current_price: float,
+        volume_ratio: float,
+        technical_data: Dict[str, Any] = None,
+    ) -> List[Dict[str, Any]]:
+        """
+        Check for alternative entry opportunities using WatchlistAltEntryChecker.
+
+        This detects MA pullback entries on stocks that were previously extended.
+        """
+        if not technical_data:
+            return []
+
+        # Clear cooldowns so we always get fresh results in the tool
+        self.alt_entry_checker._cooldowns.clear()
+
+        # Build PositionContext for the checker
+        context = PositionContext(
+            symbol=position.symbol,
+            state=position.state or 0,
+            current_price=current_price,
+            entry_price=position.entry_price or 0,
+            avg_cost=position.avg_cost or position.entry_price or 0,
+            pivot_price=position.pivot or 0,
+            stop_price=position.stop_price or 0,
+            pnl_pct=0,  # Watchlist doesn't have P&L
+            shares=0,
+            volume_ratio=volume_ratio,
+            ma_21=technical_data.get('ma_21') or technical_data.get('ema_21'),
+            ma_50=technical_data.get('ma_50'),
+            ma_200=technical_data.get('ma_200'),
+            days_held=0,
+            market_regime="",
+        )
+
+        # Run the checker
+        alert_data_list = self.alt_entry_checker.check(position, context)
+
+        # Convert AlertData objects to display dicts
+        result = []
+        for alert_data in alert_data_list:
+            result.append(self._convert_alert_data(alert_data, position, current_price, technical_data))
+
+        return result
+
+    def _convert_alert_data(
+        self,
+        alert_data: AlertData,
+        position: Position,
+        current_price: float,
+        technical_data: Dict[str, Any] = None,
+    ) -> Dict[str, Any]:
+        """Convert AlertData object to dict format for display."""
+        pivot = position.pivot or 0
+        buy_zone_top = pivot * (1 + self.buy_zone_max_pct / 100) if pivot else 0
+
+        return {
+            'id': None,
+            'symbol': position.symbol,
+            'position_id': position.id,
+            'alert_type': alert_data.alert_type.value,
+            'subtype': alert_data.subtype.value,
+            'alert_time': datetime.now().isoformat(),
+            'price': current_price,
+            'pnl_pct_at_alert': ((current_price - pivot) / pivot * 100) if pivot else 0,
+            'pivot_at_alert': pivot,
+            'severity': 'info',  # Alt entries are informational/opportunity
+            'acknowledged': False,
+            'message': alert_data.message,
+            'action': alert_data.action,
+            'volume_ratio': alert_data.context.volume_ratio if alert_data.context else 0,
+            'avg_volume': getattr(position, 'avg_volume_50d', 0) or 500000,
+            'market_regime': '',
+            'grade': getattr(position, 'grade', '') or '',
+            'score': getattr(position, 'score', 0) or 0,
+            'pattern': position.pattern or 'Unknown',
+            'base_stage': position.base_stage or '?',
+            'rs_rating': position.rs_rating,
+            'buy_zone_low': pivot,
+            'buy_zone_high': buy_zone_top,
+            'ma_21': technical_data.get('ma_21') or technical_data.get('ema_21') if technical_data else None,
+            'ma_50': technical_data.get('ma_50') if technical_data else None,
+        }
 
     def _create_alert(
         self,
@@ -350,6 +456,7 @@ class BreakoutCheckerTool:
         high: float = 0,
         low: float = 0,
         market_regime: str = "",
+        technical_data: Dict[str, Any] = None,
     ) -> Dict[str, Any]:
         """
         Get a quick summary of breakout status.
@@ -358,7 +465,7 @@ class BreakoutCheckerTool:
             Dict with status, message, and alert details
         """
         alerts = self.check_position(
-            position, current_price, volume, avg_volume, high, low, market_regime
+            position, current_price, volume, avg_volume, high, low, market_regime, technical_data
         )
 
         if not alerts:

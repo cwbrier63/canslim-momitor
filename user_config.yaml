@@ -28,9 +28,11 @@ gui:
         - 8
         - 9
         - 10
+        - 11
         - 12
         - 13
         - 14
+        - 15
         - 16
         - 17
         - 18
@@ -41,8 +43,6 @@ gui:
         - 23
         - 24
         - 25
-        - 11
-        - 15
         - 26
         - 27
         - 28
@@ -55,6 +55,13 @@ gui:
         - 35
         - 36
         - 37
+        - 38
+        - 39
+        - 40
+        - 41
+        - 42
+        - 43
+        - 44
         column_widths:
           7: 28
           11: 28
@@ -180,7 +187,7 @@ database:
 position_management:
   default_stop_pct: 7.0
   default_tp1_pct: 20.0
-  default_tp2_pct: 25.0  # IBD recommends 25-30% for TP2
+  default_tp2_pct: 25.0
   pyramid_1_pct: 2.5
   pyramid_2_pct: 5.0
   max_extension_pct: 10.0
@@ -265,16 +272,12 @@ alerts:
     stop_warning_pct: 2
     pyramid_min_bars: 2
   alt_entry:
-    # Minimum extension before watching for pullback
     min_extension_pct: 5.0
-    # MA bounce thresholds
-    ema_21_bounce_pct: 1.5    # Within 1.5% of 21 EMA
-    ma_50_bounce_pct: 2.0     # Within 2% of 50 MA
-    bounce_volume_min: 0.7    # At least 70% avg volume
-    # Pivot retest
-    pivot_retest_pct: 3.0     # Within 3% of pivot (back in buy zone)
-    # Cooldown
-    cooldown_hours: 4         # Hours between same alert type
+    ema_21_bounce_pct: 1.5
+    ma_50_bounce_pct: 2.0
+    bounce_volume_min: 0.7
+    pivot_retest_pct: 3.0
+    cooldown_hours: 4
   display:
     default_days: 30
     auto_refresh: true

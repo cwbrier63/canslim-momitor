@@ -33,6 +33,7 @@ class KanbanColumn(QFrame):
     card_context_menu = pyqtSignal(int, object)  # position_id, QPoint
     card_alert_clicked = pyqtSignal(int, int)  # alert_id, position_id
     add_clicked = pyqtSignal(int)  # state
+    view_toggled = pyqtSignal(float)  # emits new state being shown (-1.5 or 0)
     
     def __init__(
         self,
@@ -48,14 +49,18 @@ class KanbanColumn(QFrame):
         self.color = color
         self.cards: List['PositionCard'] = []
         self._all_cards: List['PositionCard'] = []  # Keep track of all cards for filtering
-        
+
+        # Toggle state for Watching/Exited Watch column (state 0 can toggle to -1.5)
+        self._base_state = state  # Original state (0 for watching column)
+        self._showing_exited_watch = False  # True when showing State -1.5
+
         # Filter state
         self._symbol_filter = ""
         self._pattern_filter = ""
         self._sort_by = "symbol"
         self._has_alert_filter = False
         self._alert_type_filter = ""
-        
+
         self._setup_ui()
         self.setAcceptDrops(True)
     
@@ -80,22 +85,46 @@ class KanbanColumn(QFrame):
         
         # Header
         header_layout = QHBoxLayout()
-        
+
         # Color indicator
-        color_bar = QFrame()
-        color_bar.setFixedSize(4, 20)
-        color_bar.setStyleSheet(f"background-color: {self.color}; border-radius: 2px;")
-        header_layout.addWidget(color_bar)
-        
+        self.color_bar = QFrame()
+        self.color_bar.setFixedSize(4, 20)
+        self.color_bar.setStyleSheet(f"background-color: {self.color}; border-radius: 2px;")
+        header_layout.addWidget(self.color_bar)
+
         # Title
-        title_label = QLabel(self.title)
+        self.title_label = QLabel(self.title)
         title_font = QFont()
         title_font.setBold(True)
-        title_label.setFont(title_font)
-        header_layout.addWidget(title_label)
-        
+        self.title_label.setFont(title_font)
+        header_layout.addWidget(self.title_label)
+
+        # Toggle button for Watching column (state 0) to switch to Exited Watch (-1.5)
+        if self.state == 0:
+            self.toggle_btn = QPushButton("⇄")
+            self.toggle_btn.setToolTip("Toggle: Watching ↔ Exited Watch")
+            self.toggle_btn.setFixedSize(22, 22)
+            self.toggle_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: transparent;
+                    border: 1px solid #9C27B0;
+                    color: #9C27B0;
+                    border-radius: 3px;
+                    font-size: 12px;
+                    font-weight: bold;
+                }
+                QPushButton:hover {
+                    background-color: #F3E5F5;
+                }
+                QPushButton:pressed {
+                    background-color: #E1BEE7;
+                }
+            """)
+            self.toggle_btn.clicked.connect(self._on_toggle_view)
+            header_layout.addWidget(self.toggle_btn)
+
         header_layout.addStretch()
-        
+
         # Count badge
         self.count_label = QLabel("0")
         self.count_label.setStyleSheet(f"""
@@ -106,7 +135,7 @@ class KanbanColumn(QFrame):
             font-size: 11px;
         """)
         header_layout.addWidget(self.count_label)
-        
+
         layout.addLayout(header_layout)
         
         # Add button (only for watchlist column)
@@ -322,15 +351,59 @@ class KanbanColumn(QFrame):
         self.sort_combo.setCurrentIndex(0)
         self.alert_filter_btn.setChecked(False)
         self.alert_type_combo.setCurrentIndex(0)
-        
+
         self._symbol_filter = ""
         self._pattern_filter = ""
         self._sort_by = "symbol"
         self._has_alert_filter = False
         self._alert_type_filter = ""
-        
+
         self._apply_filters()
-    
+
+    def _on_toggle_view(self):
+        """Toggle between Watching (State 0) and Exited Watch (State -1.5)."""
+        if self._base_state != 0:
+            return  # Only state 0 column can toggle
+
+        self._showing_exited_watch = not self._showing_exited_watch
+
+        if self._showing_exited_watch:
+            # Switch to Exited Watch view
+            self.state = -1.5
+            new_title = "Exited Watch"
+            new_color = "#9C27B0"  # Purple
+            self.toggle_btn.setToolTip("Toggle: Exited Watch → Watching")
+        else:
+            # Switch back to Watching view
+            self.state = 0
+            new_title = "Watching"
+            new_color = "#17A2B8"  # Cyan
+            self.toggle_btn.setToolTip("Toggle: Watching → Exited Watch")
+
+        # Update appearance
+        self.title = new_title
+        self.color = new_color
+        self.title_label.setText(new_title)
+        self.color_bar.setStyleSheet(f"background-color: {new_color}; border-radius: 2px;")
+        self.count_label.setStyleSheet(f"""
+            background-color: {new_color};
+            color: white;
+            padding: 2px 8px;
+            border-radius: 10px;
+            font-size: 11px;
+        """)
+
+        # Emit signal so KanbanWindow can reload positions
+        self.view_toggled.emit(self.state)
+
+    def is_showing_exited_watch(self) -> bool:
+        """Return True if this column is showing Exited Watch (State -1.5)."""
+        return self._showing_exited_watch
+
+    def get_displayed_state(self) -> float:
+        """Return the state currently being displayed (0 or -1.5 for watching column)."""
+        return self.state
+
     def _apply_filters(self):
         """Apply current filters and sorting to cards."""
         # Filter cards

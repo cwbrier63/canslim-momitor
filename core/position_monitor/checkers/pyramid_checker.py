@@ -15,6 +15,7 @@ import logging
 from canslim_monitor.data.models import Position
 from canslim_monitor.services.alert_service import AlertType, AlertSubtype, AlertData
 from canslim_monitor.utils.level_calculator import LevelCalculator
+from canslim_monitor.utils.discord_formatters import build_pyramid_embed, build_position_embed
 
 from .base_checker import BaseChecker, PositionContext
 
@@ -107,31 +108,35 @@ class PyramidChecker(BaseChecker):
         """Check if ready for first pyramid add."""
         if self.is_on_cooldown(context.symbol, AlertSubtype.P1_READY):
             return None
-        
-        # Calculate add size (half of initial position)
-        add_shares = int(context.shares * 0.5)
-        add_value = add_shares * context.current_price
-        
-        message = (
-            f"📈 PY1 ADD ZONE\n\n"
-            f"Price: {self.format_price(context.current_price)} "
-            f"({self.format_pct(context.pnl_pct)} from entry)\n"
-            f"Entry: {self.format_price(context.entry_price)}\n"
-            f"Zone: 0-5% above entry\n\n"
-            f"▶ ADD TO POSITION\n"
-            f"   Suggested: {add_shares} shares (~50% of initial)\n"
-            f"   Cost: {self.format_price(add_value)}\n\n"
-            f"IBD Rule: Pyramid in small increments as position works."
+
+        # Calculate pyramid zone
+        zone_low = context.entry_price
+        zone_high = context.entry_price * 1.05
+
+        # Build compact embed format
+        message = build_pyramid_embed(
+            symbol=context.symbol,
+            price=context.current_price,
+            entry_price=context.entry_price,
+            pnl_pct=context.pnl_pct,
+            pyramid_level="PY1",
+            zone_low=zone_low,
+            zone_high=zone_high,
+            volume_ratio=context.volume_ratio,
+            ma_21=context.ma_21,
+            ma_50=context.ma_50,
+            days_in_position=context.days_in_position,
+            market_regime=context.market_regime,
         )
-        
+
         self.set_cooldown(context.symbol, AlertSubtype.P1_READY)
-        
+
         return self.create_alert(
             context=context,
             alert_type=AlertType.PYRAMID,
             subtype=AlertSubtype.P1_READY,
             message=message,
-            action="ADD TO POSITION",
+            action="ADD 25% TO POSITION",
             priority="P1",
         )
     
@@ -139,18 +144,30 @@ class PyramidChecker(BaseChecker):
         """Check if extended beyond PY1 zone."""
         if self.is_on_cooldown(context.symbol, AlertSubtype.P1_EXTENDED):
             return None
-        
-        message = (
-            f"📈 EXTENDED BEYOND PY1 ZONE\n\n"
-            f"Price: {self.format_price(context.current_price)} "
-            f"({self.format_pct(context.pnl_pct)} from entry)\n"
-            f"PY1 Zone: 0-5% above entry\n\n"
-            f"Position has moved past ideal PY1 add zone.\n"
-            f"Wait for pullback or continue to PY2 zone."
+
+        ext_pct = context.pnl_pct - 5.0  # How far past 5% zone
+
+        # Build compact embed format
+        line2 = f"Extended: +{ext_pct:.1f}% above PY1 zone (0-5%)"
+        message = build_position_embed(
+            alert_type='PYRAMID',
+            subtype='PY1_EXTENDED',
+            symbol=context.symbol,
+            price=context.current_price,
+            pnl_pct=context.pnl_pct,
+            entry_price=context.entry_price,
+            line2_data=line2,
+            ma_21=context.ma_21,
+            ma_50=context.ma_50,
+            days_in_position=context.days_in_position,
+            action="Wait for pullback to 21 EMA to add",
+            priority='P2',
+            market_regime=context.market_regime,
+            custom_title=f"PY1 EXTENDED: {context.symbol}",
         )
-        
+
         self.set_cooldown(context.symbol, AlertSubtype.P1_EXTENDED)
-        
+
         return self.create_alert(
             context=context,
             alert_type=AlertType.PYRAMID,
@@ -164,25 +181,29 @@ class PyramidChecker(BaseChecker):
         """Check if ready for second pyramid add."""
         if self.is_on_cooldown(context.symbol, AlertSubtype.P2_READY):
             return None
-        
-        # Calculate add size (25% of current position)
-        add_shares = int(context.shares * 0.25)
-        add_value = add_shares * context.current_price
-        
-        message = (
-            f"📈📈 PY2 ADD ZONE\n\n"
-            f"Price: {self.format_price(context.current_price)} "
-            f"({self.format_pct(context.pnl_pct)} from entry)\n"
-            f"Entry: {self.format_price(context.entry_price)}\n"
-            f"Zone: 5-10% above entry\n\n"
-            f"▶ FINAL ADD OPPORTUNITY\n"
-            f"   Suggested: {add_shares} shares (~25% of current)\n"
-            f"   Cost: {self.format_price(add_value)}\n\n"
-            f"This is typically the final add point for position building."
+
+        # Calculate pyramid zone
+        zone_low = context.entry_price * 1.05
+        zone_high = context.entry_price * 1.10
+
+        # Build compact embed format
+        message = build_pyramid_embed(
+            symbol=context.symbol,
+            price=context.current_price,
+            entry_price=context.entry_price,
+            pnl_pct=context.pnl_pct,
+            pyramid_level="PY2",
+            zone_low=zone_low,
+            zone_high=zone_high,
+            volume_ratio=context.volume_ratio,
+            ma_21=context.ma_21,
+            ma_50=context.ma_50,
+            days_in_position=context.days_in_position,
+            market_regime=context.market_regime,
         )
-        
+
         self.set_cooldown(context.symbol, AlertSubtype.P2_READY)
-        
+
         return self.create_alert(
             context=context,
             alert_type=AlertType.PYRAMID,
@@ -196,18 +217,30 @@ class PyramidChecker(BaseChecker):
         """Check if extended beyond PY2 zone."""
         if self.is_on_cooldown(context.symbol, AlertSubtype.P2_EXTENDED):
             return None
-        
-        message = (
-            f"📈 EXTENDED BEYOND PY2 ZONE\n\n"
-            f"Price: {self.format_price(context.current_price)} "
-            f"({self.format_pct(context.pnl_pct)} from entry)\n"
-            f"PY2 Zone: 5-10% above entry\n\n"
-            f"Position has moved past add zones.\n"
-            f"Do not chase - position building complete."
+
+        ext_pct = context.pnl_pct - 10.0  # How far past 10% zone
+
+        # Build compact embed format
+        line2 = f"Extended: +{ext_pct:.1f}% above PY2 zone (5-10%)"
+        message = build_position_embed(
+            alert_type='PYRAMID',
+            subtype='PY2_EXTENDED',
+            symbol=context.symbol,
+            price=context.current_price,
+            pnl_pct=context.pnl_pct,
+            entry_price=context.entry_price,
+            line2_data=line2,
+            ma_21=context.ma_21,
+            ma_50=context.ma_50,
+            days_in_position=context.days_in_position,
+            action="Do not chase - position building complete",
+            priority='P2',
+            market_regime=context.market_regime,
+            custom_title=f"PY2 EXTENDED: {context.symbol}",
         )
-        
+
         self.set_cooldown(context.symbol, AlertSubtype.P2_EXTENDED)
-        
+
         return self.create_alert(
             context=context,
             alert_type=AlertType.PYRAMID,
@@ -221,33 +254,44 @@ class PyramidChecker(BaseChecker):
         """Check for pullback to 21 EMA."""
         if context.ma_21 is None:
             return None
-        
+
         if self.is_on_cooldown(context.symbol, AlertSubtype.PULLBACK):
             return None
-        
+
         # Check if price is within tolerance of 21 EMA
         distance_pct = abs((context.current_price - context.ma_21) / context.ma_21 * 100)
-        
+
         if distance_pct > self.pullback_ema_tolerance:
             return None
-        
+
         # Must be above 21 EMA (or touching it from above)
         if context.current_price < context.ma_21 * 0.99:  # 1% below is too much
             return None
-        
-        message = (
-            f"📈 PULLBACK TO 21 EMA\n\n"
-            f"Price: {self.format_price(context.current_price)}\n"
-            f"21 EMA: {self.format_price(context.ma_21)}\n"
-            f"Distance: {distance_pct:.1f}%\n\n"
-            f"▶ POTENTIAL ADD POINT\n"
-            f"   Consider adding if volume is light on pullback\n\n"
-            f"IBD Rule: Pullbacks to the 21-day EMA on light volume "
-            f"can be good add points in a strong position."
+
+        # Volume description
+        vol_desc = "Light" if context.volume_ratio < 1.0 else "Normal" if context.volume_ratio < 1.5 else "Heavy"
+
+        # Build compact embed format
+        line2 = f"21 EMA: ${context.ma_21:.2f} | Distance: {distance_pct:.1f}%"
+        message = build_position_embed(
+            alert_type='ADD',
+            subtype='PULLBACK',
+            symbol=context.symbol,
+            price=context.current_price,
+            pnl_pct=context.pnl_pct,
+            entry_price=context.entry_price,
+            line2_data=line2,
+            ma_21=context.ma_21,
+            ma_50=context.ma_50,
+            days_in_position=context.days_in_position,
+            action=f"Consider adding if volume stays light ({vol_desc})",
+            priority='P1',
+            market_regime=context.market_regime,
+            custom_title=f"PULLBACK TO 21 EMA: {context.symbol}",
         )
-        
+
         self.set_cooldown(context.symbol, AlertSubtype.PULLBACK)
-        
+
         return self.create_alert(
             context=context,
             alert_type=AlertType.ADD,

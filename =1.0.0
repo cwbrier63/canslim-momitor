@@ -1,0 +1,11 @@
+Collecting python-docx
+  Downloading python_docx-1.2.0-py3-none-any.whl.metadata (2.0 kB)
+Collecting lxml>=3.1.0 (from python-docx)
+  Downloading lxml-6.0.2-cp314-cp314-win_amd64.whl.metadata (3.7 kB)
+Requirement already satisfied: typing_extensions>=4.9.0 in c:\users\cwbri\appdata\local\python\pythoncore-3.14-64\lib\site-packages (from python-docx) (4.15.0)
+Downloading python_docx-1.2.0-py3-none-any.whl (252 kB)
+Downloading lxml-6.0.2-cp314-cp314-win_amd64.whl (4.1 MB)
+   ---------------------------------------- 4.1/4.1 MB 9.5 MB/s  0:00:00
+Installing collected packages: lxml, python-docx
+
+Successfully installed lxml-6.0.2 python-docx-1.2.0

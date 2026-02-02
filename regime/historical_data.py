@@ -24,7 +24,7 @@ API Key:
 import os
 import time
 import logging
-from datetime import datetime, date, timedelta
+from datetime import datetime, date, timedelta, timezone
 from typing import List, Dict, Optional, Tuple
 from dataclasses import dataclass
 
@@ -255,8 +255,10 @@ class MassiveHistoricalClient:
             
             bars = []
             for agg in aggs:
-                bar_date = datetime.fromtimestamp(agg.timestamp / 1000).date()
-                
+                # Use UTC to avoid timezone shift issues
+                # Polygon timestamps are in UTC milliseconds
+                bar_date = datetime.fromtimestamp(agg.timestamp / 1000, tz=timezone.utc).date()
+
                 bars.append(DailyBar(
                     date=bar_date,
                     open=float(agg.open),

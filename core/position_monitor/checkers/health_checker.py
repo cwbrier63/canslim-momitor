@@ -13,6 +13,7 @@ import logging
 from canslim_monitor.data.models import Position
 from canslim_monitor.services.alert_service import AlertType, AlertSubtype, AlertData
 from canslim_monitor.utils.health_calculator import HealthCalculator, HealthRating
+from canslim_monitor.utils.discord_formatters import build_health_embed, build_position_embed
 
 from .base_checker import BaseChecker, PositionContext
 
@@ -125,31 +126,35 @@ class HealthChecker(BaseChecker):
         """Check for critical health score."""
         if health_result.rating != HealthRating.CRITICAL:
             return None
-        
+
         # Check if this is a new crossing into critical
         previous_score = self._previous_health.get(context.symbol, 100)
         if previous_score < 50:  # Already was critical
             if self.is_on_cooldown(context.symbol, AlertSubtype.CRITICAL):
                 return None
-        
-        # Format warning codes
-        warning_codes = ", ".join(health_result.warning_codes[:5])
-        
-        message = (
-            f"🚨 CRITICAL HEALTH SCORE\n\n"
-            f"Score: {health_result.score}/100\n"
-            f"Rating: CRITICAL\n"
-            f"P&L: {self.format_pct(context.pnl_pct)}\n\n"
-            f"Warning Factors:\n"
-            f"   {warning_codes}\n\n"
-            f"▶ ACTION: {health_result.action}\n"
-            f"   {health_result.primary_warning}\n\n"
-            f"Multiple warning factors indicate increased risk.\n"
-            f"Consider reducing position or exiting."
+
+        # Format warning codes (short)
+        warning_codes = ", ".join(health_result.warning_codes[:3])
+
+        # Build compact embed format
+        line2 = f"Health: {health_result.score}/100 | {warning_codes}"
+        message = build_health_embed(
+            symbol=context.symbol,
+            price=context.current_price,
+            entry_price=context.entry_price,
+            pnl_pct=context.pnl_pct,
+            subtype='CRITICAL',
+            line2_data=line2,
+            action="Consider reducing or exiting",
+            ma_21=context.ma_21,
+            ma_50=context.ma_50,
+            days_in_position=context.days_in_position,
+            market_regime=context.market_regime,
+            priority='P0',
         )
-        
+
         self.set_cooldown(context.symbol, AlertSubtype.CRITICAL)
-        
+
         return self.create_alert(
             context=context,
             alert_type=AlertType.HEALTH,
@@ -162,41 +167,53 @@ class HealthChecker(BaseChecker):
     def _check_earnings(self, context: PositionContext) -> AlertData:
         """
         Check for earnings proximity with P&L-based recommendation.
-        
+
         IBD Gap Fix: Different advice based on P&L position.
         """
         if context.days_to_earnings is None:
             return None
-        
+
         # Determine urgency level
         if context.days_to_earnings > self.earnings_warning_days:
             return None
-        
+
         if self.is_on_cooldown(context.symbol, AlertSubtype.EARNINGS):
             return None
-        
+
         is_critical = context.days_to_earnings <= self.earnings_critical_days
-        
+
         # P&L-based recommendation (IBD gap fix)
         recommendation = self._get_earnings_recommendation(context.pnl_pct)
-        
-        urgency = "🚨 URGENT" if is_critical else "⚠️ NOTICE"
-        priority = "P0" if is_critical else "P2"
-        
-        message = (
-            f"{urgency}: EARNINGS IN {context.days_to_earnings} DAYS\n\n"
-            f"Current P&L: {self.format_pct(context.pnl_pct)}\n"
-            f"Position Value: {self.format_price(context.shares * context.current_price)}\n\n"
-            f"▶ RECOMMENDATION: {recommendation['action']}\n"
-            f"   {recommendation['reason']}\n\n"
-            f"Earnings add significant uncertainty. IBD suggests:\n"
-            f"• In profit (10%+): Can hold through with trailing stop\n"
-            f"• Near breakeven: Sell before to avoid gap down risk\n"
-            f"• In loss: Exit before earnings (don't compound losses)"
+
+        priority = "P0" if is_critical else "P1"
+
+        # Build context description
+        if context.pnl_pct >= self.earnings_reduce_threshold:
+            earnings_context = "Up - can hold with stop"
+        elif context.pnl_pct >= self.earnings_negative_threshold:
+            earnings_context = "Near BE - sell to avoid gap risk"
+        else:
+            earnings_context = "Down - exit before ER"
+
+        # Build compact embed format
+        line2 = f"Earnings in {context.days_to_earnings} days | {earnings_context}"
+        message = build_health_embed(
+            symbol=context.symbol,
+            price=context.current_price,
+            entry_price=context.entry_price,
+            pnl_pct=context.pnl_pct,
+            subtype='EARNINGS',
+            line2_data=line2,
+            action=recommendation['action'],
+            ma_21=context.ma_21,
+            ma_50=context.ma_50,
+            days_in_position=context.days_in_position,
+            market_regime=context.market_regime,
+            priority=priority,
         )
-        
+
         self.set_cooldown(context.symbol, AlertSubtype.EARNINGS)
-        
+
         return self.create_alert(
             context=context,
             alert_type=AlertType.HEALTH,
@@ -235,24 +252,29 @@ class HealthChecker(BaseChecker):
         """Check for late-stage base warning."""
         if context.base_stage < 4:
             return None
-        
+
         if self.is_on_cooldown(context.symbol, AlertSubtype.LATE_STAGE):
             return None
-        
-        message = (
-            f"⚠️ LATE-STAGE BASE (Stage {context.base_stage})\n\n"
-            f"This is a later-stage breakout with elevated risk.\n"
-            f"P&L: {self.format_pct(context.pnl_pct)}\n\n"
-            f"Late-stage considerations:\n"
-            f"• Tighter stops recommended (use stage-adjusted)\n"
-            f"• Take profits earlier (don't hold for full TP)\n"
-            f"• 21 EMA more important than 50 MA\n"
-            f"• Failed breakouts more common\n\n"
-            f"IBD research shows Stage 4+ bases have higher failure rates."
+
+        # Build compact embed format
+        line2 = f"Stage: {context.base_stage} | Higher failure rate"
+        message = build_health_embed(
+            symbol=context.symbol,
+            price=context.current_price,
+            entry_price=context.entry_price,
+            pnl_pct=context.pnl_pct,
+            subtype='LATE_STAGE',
+            line2_data=line2,
+            action="Tighter stops, take profits earlier",
+            ma_21=context.ma_21,
+            ma_50=context.ma_50,
+            days_in_position=context.days_in_position,
+            market_regime=context.market_regime,
+            priority='P2',
         )
-        
+
         self.set_cooldown(context.symbol, AlertSubtype.LATE_STAGE)
-        
+
         return self.create_alert(
             context=context,
             alert_type=AlertType.HEALTH,
@@ -265,58 +287,51 @@ class HealthChecker(BaseChecker):
     def _check_extended_from_pivot(self, context: PositionContext) -> AlertData:
         """
         Check if price is extended from pivot buy point.
-        
+
         IBD Rule: Don't chase stocks more than 5% above the proper buy point.
         Most breakouts that succeed pull back to the buy zone within a few days.
         """
         if context.pivot_price is None or context.pivot_price <= 0:
             return None
-        
+
         if self.is_on_cooldown(context.symbol, AlertSubtype.EXTENDED):
             return None
-        
+
         # Calculate extension from pivot
         pct_above_pivot = ((context.current_price - context.pivot_price) / context.pivot_price) * 100
-        
+
         # Only alert if extended above warning threshold
         if pct_above_pivot < self.extended_warning_pct:
             return None
-        
+
         is_danger = pct_above_pivot >= self.extended_danger_pct
-        urgency = "🚨" if is_danger else "⚠️"
         priority = "P1" if is_danger else "P2"
-        
+
         # Different advice based on how extended
         if is_danger:
-            action = "DO NOT ADD - VERY EXTENDED"
-            advice = (
-                f"Stock is {pct_above_pivot:.1f}% above pivot - VERY EXTENDED.\n"
-                f"• No new buys at this level\n"
-                f"• Consider taking partial profits\n"
-                f"• Raise stop to protect gains\n"
-                f"• Wait for pullback to add"
-            )
+            action = "No new buys - wait for pullback"
         else:
-            action = "CAUTION - EXTENDED FROM BUY ZONE"
-            advice = (
-                f"Stock is {pct_above_pivot:.1f}% above pivot.\n"
-                f"• Outside optimal buy zone (0-5% above pivot)\n"
-                f"• Wait for pullback to add\n"
-                f"• Most successful breakouts test buy zone"
-            )
-        
-        message = (
-            f"{urgency} EXTENDED FROM PIVOT\n\n"
-            f"Current: {self.format_price(context.current_price)}\n"
-            f"Pivot: {self.format_price(context.pivot_price)}\n"
-            f"Extension: +{pct_above_pivot:.1f}%\n\n"
-            f"▶ {advice}\n\n"
-            f"IBD Rule: The best time to buy is within 5% of the pivot point.\n"
-            f"Chasing extended stocks leads to poor risk/reward."
+            action = "No new buys - wait for pullback to add"
+
+        # Build compact embed format
+        line2 = f"Extension: +{pct_above_pivot:.1f}% above pivot (max 5%)"
+        message = build_health_embed(
+            symbol=context.symbol,
+            price=context.current_price,
+            entry_price=context.entry_price,
+            pnl_pct=context.pnl_pct,
+            subtype='EXTENDED',
+            line2_data=line2,
+            action=action,
+            ma_21=context.ma_21,
+            ma_50=context.ma_50,
+            days_in_position=context.days_in_position,
+            market_regime=context.market_regime,
+            priority=priority,
         )
-        
+
         self.set_cooldown(context.symbol, AlertSubtype.EXTENDED)
-        
+
         return self.create_alert(
             context=context,
             alert_type=AlertType.HEALTH,

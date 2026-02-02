@@ -39,10 +39,21 @@ class TrendType(enum.Enum):
 
 
 class DDayTrend(enum.Enum):
-    """Distribution day trend direction."""
+    """
+    Distribution day trend direction.
+
+    Considers both the 5-day delta AND the absolute count:
+    - IMPROVING: Count is dropping (delta < 0)
+    - WORSENING: Count is rising (delta > 0)
+    - HEALTHY: Count is low (0-3) and stable (delta = 0)
+    - STABLE: Count is moderate (4-5) and stable (delta = 0)
+    - ELEVATED_STABLE: Count is high (6+) but not rising (delta = 0)
+    """
     IMPROVING = "IMPROVING"
     WORSENING = "WORSENING"
-    FLAT = "FLAT"
+    HEALTHY = "HEALTHY"           # Low count (0-3), stable
+    STABLE = "STABLE"             # Moderate count (4-5), stable
+    ELEVATED_STABLE = "ELEVATED_STABLE"  # High count (6+), stable
 
 
 class IBDMarketStatus(enum.Enum):
@@ -296,10 +307,58 @@ class MarketRegimeAlert(Base):
         return [date.fromisoformat(d) for d in self.qqq_d_dates.split(',') if d]
 
 
+class PhaseChangeType(enum.Enum):
+    """Types of market phase transitions."""
+    NONE = "NONE"
+    UPGRADE = "UPGRADE"      # Moving to more bullish phase
+    DOWNGRADE = "DOWNGRADE"  # Moving to more bearish phase
+    LATERAL = "LATERAL"      # Same tier, different state
+
+
+class MarketPhaseHistory(Base):
+    """
+    Tracks history of market phase changes.
+
+    Used for:
+    - Audit trail of phase transitions
+    - Analysis of phase duration
+    - Alert generation on phase changes
+    """
+    __tablename__ = 'market_phase_history'
+
+    id = Column(Integer, primary_key=True)
+    phase_date = Column(Date, nullable=False, index=True)
+    previous_phase = Column(String(30))
+    new_phase = Column(String(30), nullable=False)
+    change_type = Column(String(20))  # UPGRADE, DOWNGRADE, LATERAL
+    trigger_reason = Column(String(200))
+
+    # Context at time of change
+    spy_dday_count = Column(Integer)
+    qqq_dday_count = Column(Integer)
+    total_dday_count = Column(Integer)
+    ftd_active = Column(Boolean)
+    rally_day = Column(Integer)
+
+    # Additional context
+    spy_expired_today = Column(Integer, default=0)  # D-days that expired today
+    qqq_expired_today = Column(Integer, default=0)
+    ftd_gain_pct = Column(Float)  # If FTD triggered change
+
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    __table_args__ = (
+        Index('ix_phase_history_date', 'phase_date'),
+    )
+
+    def __repr__(self):
+        return f"<PhaseHistory({self.phase_date}: {self.previous_phase} -> {self.new_phase})>"
+
+
 class IBDExposureHistory(Base):
     """
     Tracks changes to IBD published exposure for post-mortem analysis.
-    
+
     New record created each time user updates the IBD exposure setting.
     This enables historical analysis of:
     - How IBD exposure changes correlated with market tops/bottoms

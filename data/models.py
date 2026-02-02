@@ -72,7 +72,12 @@ class Position(Base):
     close_reason = Column(String(30))  # STOP_HIT, TP_HIT, MANUAL, 50MA_BREAKDOWN, etc.
     realized_pnl = Column(Float)       # Dollar P&L
     realized_pnl_pct = Column(Float)   # Percentage P&L
-    
+
+    # State -1.5 (WATCHING_EXITED) - Re-entry monitoring fields
+    original_pivot = Column(Float)           # Preserved pivot for retest detection
+    ma_test_count = Column(Integer, default=0)  # Track # of MA bounces (max 3)
+    watching_exited_since = Column(DateTime)    # When entered State -1.5
+
     # Pyramid Flags
     py1_done = Column(Boolean, default=False)
     py2_done = Column(Boolean, default=False)

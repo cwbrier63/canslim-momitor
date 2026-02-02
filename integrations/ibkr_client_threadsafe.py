@@ -24,11 +24,12 @@ from dataclasses import dataclass
 class ReconnectConfig:
     """Configuration for reconnection behavior."""
     enabled: bool = True
-    initial_delay: float = 5.0      # First retry after 5 seconds
+    initial_delay: float = 30.0     # First retry after 30 seconds (Gateway needs time to restart)
     max_delay: float = 300.0        # Max 5 minutes between retries
-    backoff_factor: float = 2.0     # Double delay each attempt
+    backoff_factor: float = 1.5     # Slower backoff (1.5x instead of 2x)
     max_attempts: int = 0           # 0 = unlimited attempts
     health_check_interval: float = 30.0  # Check connection every 30 seconds
+    gateway_restart_delay: float = 120.0  # Wait 2 minutes if overnight restart detected
 
 
 class ThreadSafeIBKRClient:
@@ -212,56 +213,88 @@ class ThreadSafeIBKRClient:
     def _on_ib_disconnect(self):
         """Handle IB disconnect event."""
         if not self._shutdown.is_set():
-            self.logger.warning("IBKR disconnected unexpectedly")
+            self.logger.warning(
+                "IBKR disconnected unexpectedly - "
+                "likely IB Gateway nightly restart or network issue"
+            )
             self._handle_disconnect()
-    
+
     def _handle_disconnect(self):
         """Handle disconnect and trigger reconnection."""
+        was_connected = self._connected.is_set()
         self._connected.clear()
         self._last_disconnect_time = datetime.now()
-        
+
+        self.logger.info(
+            f"Connection state changed: connected={was_connected} -> disconnected, "
+            f"reconnect_enabled={self.reconnect_config.enabled}, "
+            f"shutdown_requested={self._shutdown.is_set()}"
+        )
+
         # Notify callback
         if self.on_disconnect:
             try:
                 self.on_disconnect()
             except Exception as e:
                 self.logger.warning(f"on_disconnect callback error: {e}")
-        
+
         # Trigger reconnection if enabled
         if self.reconnect_config.enabled and not self._shutdown.is_set():
+            self.logger.info("Scheduling automatic reconnection...")
             self._schedule_reconnect()
+        else:
+            self.logger.warning(
+                f"Auto-reconnect NOT triggered: enabled={self.reconnect_config.enabled}, "
+                f"shutdown={self._shutdown.is_set()}"
+            )
     
     def _schedule_reconnect(self):
         """Schedule a reconnection attempt."""
         if self._reconnecting or self._shutdown.is_set():
             return
-        
+
         self._reconnecting = True
-        
-        # Calculate delay with exponential backoff
-        delay = min(
-            self.reconnect_config.initial_delay * (
-                self.reconnect_config.backoff_factor ** self._reconnect_attempts
-            ),
-            self.reconnect_config.max_delay
-        )
-        
+
+        # Detect if this is likely an overnight Gateway restart (between midnight and 3 AM)
+        current_hour = datetime.now().hour
+        is_overnight_restart = 0 <= current_hour <= 3
+
+        # Calculate delay
+        if is_overnight_restart and self._reconnect_attempts == 0:
+            # First attempt during overnight window - use gateway restart delay
+            delay = self.reconnect_config.gateway_restart_delay
+            self.logger.info(
+                f"Overnight Gateway restart detected (hour={current_hour}). "
+                f"Waiting {delay:.0f}s for Gateway to fully restart..."
+            )
+        else:
+            # Normal exponential backoff
+            delay = min(
+                self.reconnect_config.initial_delay * (
+                    self.reconnect_config.backoff_factor ** self._reconnect_attempts
+                ),
+                self.reconnect_config.max_delay
+            )
+
         self._reconnect_attempts += 1
-        
-        # Check max attempts
-        if (self.reconnect_config.max_attempts > 0 and 
+
+        # Check max attempts (0 = unlimited)
+        if (self.reconnect_config.max_attempts > 0 and
             self._reconnect_attempts > self.reconnect_config.max_attempts):
             self.logger.error(
-                f"Max reconnection attempts ({self.reconnect_config.max_attempts}) exceeded"
+                f"Max reconnection attempts ({self.reconnect_config.max_attempts}) exceeded. "
+                f"Will continue health checks and retry on next disconnect detection."
             )
             self._reconnecting = False
+            # Reset attempts so health check can trigger new reconnection cycle
+            self._reconnect_attempts = 0
             return
-        
+
         self.logger.info(
             f"Scheduling reconnection attempt {self._reconnect_attempts} "
-            f"in {delay:.1f}s"
+            f"in {delay:.1f}s (overnight={is_overnight_restart})"
         )
-        
+
         # Start reconnection in new thread
         reconnect_thread = threading.Thread(
             target=self._do_reconnect,
@@ -274,43 +307,89 @@ class ThreadSafeIBKRClient:
     def _do_reconnect(self, delay: float):
         """Perform reconnection after delay."""
         try:
-            # Wait for delay (but check shutdown periodically)
+            self.logger.info(f"Waiting {delay:.1f}s before reconnection attempt...")
+
+            # Wait for delay (but check shutdown periodically and log progress)
             wait_start = time.time()
+            last_log_time = wait_start
             while time.time() - wait_start < delay:
                 if self._shutdown.is_set():
+                    self.logger.info("Reconnection cancelled - shutdown requested")
                     self._reconnecting = False
                     return
                 time.sleep(0.5)
-            
+
+                # Log progress every 30 seconds during long waits
+                elapsed = time.time() - wait_start
+                if time.time() - last_log_time >= 30.0:
+                    remaining = delay - elapsed
+                    self.logger.info(f"Still waiting for Gateway... {remaining:.0f}s remaining")
+                    last_log_time = time.time()
+
             if self._shutdown.is_set():
+                self.logger.info("Reconnection cancelled - shutdown requested")
                 self._reconnecting = False
                 return
-            
-            self.logger.info(f"Attempting reconnection (attempt {self._reconnect_attempts})...")
-            
-            # Stop old thread if running
+
+            self.logger.info(
+                f"Attempting reconnection to {self.host}:{self.port} "
+                f"(attempt {self._reconnect_attempts}, client_id={self.client_id})..."
+            )
+
+            # Stop old thread if running - ensure clean disconnection first
             if self._thread and self._thread.is_alive():
+                self.logger.info("Stopping old IB connection...")
+
+                # First, explicitly disconnect from Gateway if IB object exists
+                if self._ib and self._loop and self._loop.is_running():
+                    try:
+                        self.logger.debug("Explicitly disconnecting from Gateway...")
+                        future = asyncio.run_coroutine_threadsafe(
+                            self._async_disconnect(),
+                            self._loop
+                        )
+                        future.result(timeout=5.0)
+                        self.logger.debug("Disconnect request sent to Gateway")
+                    except Exception as e:
+                        self.logger.debug(f"Disconnect request error (may be expected): {e}")
+
+                # Now signal thread shutdown and wait
                 self._shutdown.set()
-                self._thread.join(timeout=5.0)
+                self._thread.join(timeout=10.0)  # Increased timeout
+                if self._thread.is_alive():
+                    self.logger.warning("Old IB thread did not stop cleanly")
+
+                # Wait for Gateway to process disconnect before reconnecting
+                self.logger.debug("Waiting 5s for Gateway to process disconnect...")
+                time.sleep(5.0)
+
                 self._shutdown.clear()
-            
+
+            # Clear old IB reference to ensure fresh start
+            self._ib = None
+            self._loop = None
+
             # Start fresh connection
+            self.logger.debug("Starting new IB thread...")
             self._thread = threading.Thread(
                 target=self._run_event_loop,
                 name='IBKRClient',
                 daemon=True
             )
             self._thread.start()
-            
+
             # Wait for connection
+            self.logger.debug("Waiting for connection to establish...")
             if self._connected.wait(timeout=30.0):
                 self._reconnect_attempts = 0
                 self._last_connect_time = datetime.now()
-                self.logger.info("Reconnection successful!")
-                
+                self.logger.info(
+                    f"Reconnection successful! Connected to {self.host}:{self.port}"
+                )
+
                 # Restart health check
                 self._start_health_check()
-                
+
                 # Notify callback
                 if self.on_connect:
                     try:
@@ -318,42 +397,98 @@ class ThreadSafeIBKRClient:
                     except Exception as e:
                         self.logger.warning(f"on_connect callback error: {e}")
             else:
-                self.logger.warning("Reconnection attempt failed")
+                self.logger.warning(
+                    f"Reconnection attempt {self._reconnect_attempts} failed - "
+                    f"connection timeout (30s). Will retry..."
+                )
                 # Schedule another attempt
                 self._schedule_reconnect()
-                
+
         except Exception as e:
-            self.logger.error(f"Reconnection error: {e}")
+            self.logger.error(f"Reconnection error: {e}", exc_info=True)
             self._schedule_reconnect()
         finally:
             self._reconnecting = False
     
     def _start_health_check(self):
-        """Start periodic health check timer."""
+        """Start periodic health check timer with active heartbeat."""
         if not self.reconnect_config.enabled:
             return
-            
+
         self._stop_health_check()
-        
+
         def check_health():
-            while not self._shutdown.is_set() and self._connected.is_set():
+            consecutive_failures = 0
+            max_failures = 3  # Trigger reconnect after 3 consecutive failures
+
+            self.logger.info(
+                f"Health check started (interval={self.reconnect_config.health_check_interval}s)"
+            )
+
+            while not self._shutdown.is_set():
                 time.sleep(self.reconnect_config.health_check_interval)
-                
+
                 if self._shutdown.is_set():
                     break
-                    
-                # Check if still connected
-                if self._ib and not self._ib.isConnected():
-                    self.logger.warning("Health check: Connection lost")
+
+                # Basic connection check
+                if not self._ib or not self._ib.isConnected():
+                    self.logger.warning("Health check: isConnected() returned False")
+                    consecutive_failures = max_failures  # Immediate reconnect
+                else:
+                    # Active heartbeat - try to get server time
+                    try:
+                        future = asyncio.run_coroutine_threadsafe(
+                            self._async_heartbeat(),
+                            self._loop
+                        )
+                        result = future.result(timeout=10.0)
+
+                        if result:
+                            consecutive_failures = 0  # Reset on success
+                            self.logger.debug(f"Health check OK (server time: {result})")
+                        else:
+                            consecutive_failures += 1
+                            self.logger.warning(
+                                f"Health check: heartbeat failed ({consecutive_failures}/{max_failures})"
+                            )
+                    except Exception as e:
+                        consecutive_failures += 1
+                        self.logger.warning(
+                            f"Health check: heartbeat error ({consecutive_failures}/{max_failures}): {e}"
+                        )
+
+                # Trigger reconnect if too many failures
+                if consecutive_failures >= max_failures:
+                    self.logger.error(
+                        f"Health check: {consecutive_failures} consecutive failures, "
+                        f"triggering reconnection"
+                    )
                     self._handle_disconnect()
-                    break
-        
+                    break  # Exit health check, will restart after reconnection
+
+            self.logger.debug("Health check thread exiting")
+
         self._health_check_timer = threading.Thread(
             target=check_health,
             name='IBKRHealthCheck',
             daemon=True
         )
         self._health_check_timer.start()
+
+    async def _async_heartbeat(self) -> Optional[str]:
+        """
+        Active heartbeat - request server time to verify connection is truly alive.
+        Returns server time string if successful, None if failed.
+        """
+        try:
+            server_time = self._ib.reqCurrentTime()
+            if server_time:
+                return server_time.isoformat() if hasattr(server_time, 'isoformat') else str(server_time)
+            return None
+        except Exception as e:
+            self.logger.debug(f"Heartbeat request failed: {e}")
+            return None
     
     def _stop_health_check(self):
         """Stop health check timer."""

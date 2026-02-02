@@ -266,62 +266,209 @@ class PolygonClient:
     def get_next_earnings_date(self, symbol: str) -> Optional[date]:
         """
         Get the next earnings date for a symbol.
-        
-        Uses Polygon's ticker events endpoint to find upcoming earnings.
-        
+
+        Tries multiple sources in order:
+        1. Polygon ticker events endpoint
+        2. Polygon ticker details endpoint
+        3. Yahoo Finance (fallback - most reliable for earnings)
+
         Args:
             symbol: Stock symbol (e.g., "NVDA")
-            
+
         Returns:
             Next earnings date or None if not found
         """
-        # Try ticker events endpoint first (more reliable for earnings)
-        endpoint = f"/vX/reference/tickers/{symbol.upper()}/events"
-        
-        params = {
-            'types': 'earnings',
-            'limit': 5
-        }
-        
+        symbol = symbol.upper()
+
+        # Try Polygon ticker events endpoint first
+        endpoint = f"/vX/reference/tickers/{symbol}/events"
+        params = {'types': 'earnings', 'limit': 5}
+
         response = self._make_request(endpoint, params)
-        
+
         if response and response.get('status') == 'OK':
             events = response.get('results', {}).get('events', [])
             today = date.today()
-            
+
             for event in events:
                 try:
                     event_date_str = event.get('date')
                     if event_date_str:
                         event_date = datetime.strptime(event_date_str, '%Y-%m-%d').date()
-                        # Return first future earnings date
                         if event_date >= today:
-                            self.logger.debug(f"{symbol}: Next earnings {event_date}")
+                            self.logger.debug(f"{symbol}: Next earnings {event_date} (Polygon events)")
                             return event_date
                 except Exception as e:
                     self.logger.warning(f"Error parsing earnings date for {symbol}: {e}")
                     continue
-        
-        # Fallback: Try ticker details endpoint
-        endpoint = f"/v3/reference/tickers/{symbol.upper()}"
+
+        # Fallback 1: Try Polygon ticker details endpoint
+        endpoint = f"/v3/reference/tickers/{symbol}"
         response = self._make_request(endpoint)
-        
+
         if response and response.get('status') == 'OK':
             results = response.get('results', {})
-            
-            # Check for next_earnings_date field
             earnings_str = results.get('next_earnings_date')
             if earnings_str:
                 try:
                     earnings_date = datetime.strptime(earnings_str, '%Y-%m-%d').date()
-                    self.logger.debug(f"{symbol}: Next earnings {earnings_date} (from ticker details)")
+                    self.logger.debug(f"{symbol}: Next earnings {earnings_date} (Polygon details)")
                     return earnings_date
                 except Exception as e:
                     self.logger.warning(f"Error parsing earnings date for {symbol}: {e}")
-        
-        self.logger.debug(f"{symbol}: No earnings date found")
+
+        # Fallback 2: Try Yahoo Finance (most reliable for earnings)
+        earnings_date = self._get_earnings_from_yahoo(symbol)
+        if earnings_date:
+            return earnings_date
+
+        self.logger.debug(f"{symbol}: No earnings date found from any source")
+        return None
+
+    def _get_earnings_from_yahoo(self, symbol: str) -> Optional[date]:
+        """
+        Get next earnings date from Yahoo Finance.
+
+        Args:
+            symbol: Stock symbol
+
+        Returns:
+            Next earnings date or None if not found
+        """
+        try:
+            import yfinance as yf
+            from datetime import date as date_type
+
+            self.logger.debug(f"{symbol}: Trying Yahoo Finance for earnings...")
+            ticker = yf.Ticker(symbol)
+
+            # Try earnings_dates attribute (most reliable)
+            try:
+                earnings_dates = ticker.earnings_dates
+                if earnings_dates is not None and not earnings_dates.empty:
+                    today = date_type.today()
+                    # Filter for future dates
+                    future_dates = earnings_dates[earnings_dates.index >= str(today)]
+                    if not future_dates.empty:
+                        next_date = future_dates.index[0]
+                        # Convert to date object
+                        if hasattr(next_date, 'date'):
+                            result = next_date.date()
+                        else:
+                            result = datetime.strptime(str(next_date)[:10], '%Y-%m-%d').date()
+                        self.logger.info(f"{symbol}: Next earnings {result} (Yahoo Finance)")
+                        return result
+            except Exception as e:
+                self.logger.debug(f"{symbol}: Yahoo earnings_dates failed: {e}")
+
+            # Fallback: Try calendar attribute
+            try:
+                calendar = ticker.calendar
+                if calendar and isinstance(calendar, dict):
+                    earnings_date = calendar.get('Earnings Date')
+                    if earnings_date:
+                        if isinstance(earnings_date, list) and earnings_date:
+                            earnings_date = earnings_date[0]
+                        if hasattr(earnings_date, 'date'):
+                            result = earnings_date.date()
+                        else:
+                            result = datetime.strptime(str(earnings_date)[:10], '%Y-%m-%d').date()
+                        self.logger.info(f"{symbol}: Next earnings {result} (Yahoo calendar)")
+                        return result
+            except Exception as e:
+                self.logger.debug(f"{symbol}: Yahoo calendar failed: {e}")
+
+        except ImportError:
+            self.logger.warning("yfinance not installed - Yahoo Finance fallback unavailable")
+        except Exception as e:
+            self.logger.warning(f"{symbol}: Yahoo Finance lookup failed: {e}")
+
         return None
     
+    def get_intraday_volume(self, symbol: str) -> Optional[Dict[str, Any]]:
+        """
+        Get today's cumulative intraday volume using minute aggregates.
+
+        Requires Stocks Starter tier or higher for 15-min delayed intraday data.
+
+        Args:
+            symbol: Stock symbol (e.g., "NVDA")
+
+        Returns:
+            Dict with:
+                - cumulative_volume: Total shares traded today
+                - last_price: Most recent price
+                - last_update: Timestamp of last bar
+                - bars_count: Number of minute bars
+            Returns None if data unavailable
+        """
+        symbol = symbol.upper()
+        today = date.today()
+
+        # Fetch today's minute bars
+        endpoint = f"/v2/aggs/ticker/{symbol}/range/1/minute/{today.isoformat()}/{today.isoformat()}"
+
+        params = {
+            'adjusted': 'true',
+            'sort': 'asc',
+            'limit': 500  # Should cover full trading day (390 minutes)
+        }
+
+        response = self._make_request(endpoint, params)
+
+        if not response:
+            self.logger.debug(f"{symbol}: No intraday data response")
+            return None
+
+        results = response.get('results', [])
+
+        if not results:
+            self.logger.debug(f"{symbol}: No intraday bars returned")
+            return None
+
+        # Calculate cumulative volume
+        cumulative_volume = sum(r.get('v', 0) for r in results)
+
+        # Get last bar info
+        last_bar = results[-1]
+        last_price = last_bar.get('c', 0)
+        last_timestamp = datetime.fromtimestamp(last_bar['t'] / 1000) if 't' in last_bar else None
+
+        self.logger.debug(
+            f"{symbol}: Intraday volume={cumulative_volume:,}, "
+            f"bars={len(results)}, last_price=${last_price:.2f}"
+        )
+
+        return {
+            'symbol': symbol,
+            'cumulative_volume': cumulative_volume,
+            'last_price': last_price,
+            'last_update': last_timestamp,
+            'bars_count': len(results),
+            'high': max(r.get('h', 0) for r in results),
+            'low': min(r.get('l', float('inf')) for r in results if r.get('l', 0) > 0),
+            'open': results[0].get('o', 0) if results else 0,
+        }
+
+    def get_intraday_volume_batch(self, symbols: List[str]) -> Dict[str, Optional[Dict[str, Any]]]:
+        """
+        Get intraday volume for multiple symbols.
+
+        Args:
+            symbols: List of stock symbols
+
+        Returns:
+            Dict mapping symbol to intraday data (or None)
+        """
+        results = {}
+
+        for i, symbol in enumerate(symbols):
+            self.logger.debug(f"Fetching intraday volume for {symbol} ({i+1}/{len(symbols)})")
+            intraday_data = self.get_intraday_volume(symbol)
+            results[symbol] = intraday_data
+
+        return results
+
     def get_earnings_dates_batch(self, symbols: List[str]) -> Dict[str, Optional[date]]:
         """
         Get earnings dates for multiple symbols.

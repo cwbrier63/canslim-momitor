@@ -13,6 +13,10 @@ import logging
 
 from canslim_monitor.data.models import Position
 from canslim_monitor.services.alert_service import AlertType, AlertSubtype, AlertData
+from canslim_monitor.utils.discord_formatters import (
+    build_profit_embed,
+    build_eight_week_hold_embed,
+)
 
 from .base_checker import BaseChecker, PositionContext
 
@@ -84,44 +88,40 @@ class ProfitChecker(BaseChecker):
         # Already active
         if context.eight_week_hold_active:
             return None
-        
+
         # Check cooldown
         if self.is_on_cooldown(context.symbol, AlertSubtype.EIGHT_WEEK_HOLD):
             return None
-        
+
         # Check criteria: 20%+ gain within 3 weeks of breakout
         if context.pnl_pct < self.eight_week_gain_threshold:
             return None
-        
+
         if context.days_since_breakout > self.eight_week_trigger_window:
             return None
-        
-        # Calculate hold end date
-        hold_end_date = datetime.now().date() + timedelta(weeks=self.eight_week_hold_weeks)
-        weeks_remaining = self.eight_week_hold_weeks
-        
-        message = (
-            f"🏆 8-WEEK HOLD RULE ACTIVATED!\n\n"
-            f"Gain: {self.format_pct(context.pnl_pct)} in {context.days_since_breakout} days\n"
-            f"This qualifies as a potential BIG WINNER.\n\n"
-            f"▶ HOLD for {weeks_remaining} more weeks\n"
-            f"   Target Hold Until: {hold_end_date.strftime('%b %d, %Y')}\n\n"
-            f"During 8-week hold:\n"
-            f"• TP1 alerts SUPPRESSED (don't sell early)\n"
-            f"• Use 10-week MA as guide (not daily)\n"
-            f"• Hard stop still active for capital protection\n\n"
-            f"IBD Rule: Stocks that gain 20%+ in 3 weeks often become the biggest winners."
+
+        # Build compact embed format
+        message = build_eight_week_hold_embed(
+            symbol=context.symbol,
+            price=context.current_price,
+            entry_price=context.entry_price,
+            pnl_pct=context.pnl_pct,
+            days_held=context.days_since_breakout,
+            rs_rating=context.rs_rating,
+            ma_21=context.ma_21,
+            ma_50=context.ma_50,
+            market_regime=context.market_regime,
         )
-        
+
         self.set_cooldown(context.symbol, AlertSubtype.EIGHT_WEEK_HOLD)
-        
+
         return self.create_alert(
             context=context,
             alert_type=AlertType.PROFIT,
             subtype=AlertSubtype.EIGHT_WEEK_HOLD,
             message=message,
             action="HOLD - 8-Week Rule Active",
-            priority="P0",
+            priority="P2",
         )
     
     def _is_tp1_suppressed(self, context: PositionContext) -> bool:
@@ -143,47 +143,42 @@ class ProfitChecker(BaseChecker):
         # Skip if already sold at TP1
         if context.tp1_sold > 0:
             return None
-        
+
         # Check cooldown
         if self.is_on_cooldown(context.symbol, AlertSubtype.TP1):
             return None
-        
+
         # Get TP1 target
         tp1_pct = self.default_tp1_pct
         if position is not None:
             tp1_pct = getattr(position, 'tp1_pct', None) or self.default_tp1_pct
-        
+
         if context.pnl_pct < tp1_pct:
             return None
-        
-        # Calculate sell recommendation (25% of position)
-        shares_to_sell = int(context.shares * 0.25)
-        sell_value = shares_to_sell * context.current_price
-        profit_locked = shares_to_sell * (context.current_price - context.entry_price)
-        
-        message = (
-            f"💰 TP1 TARGET REACHED!\n\n"
-            f"Gain: {self.format_pct(context.pnl_pct)}\n"
-            f"Price: {self.format_price(context.current_price)}\n"
-            f"Entry: {self.format_price(context.entry_price)}\n\n"
-            f"▶ SELL 25% OF POSITION\n"
-            f"   Shares to Sell: {shares_to_sell} of {context.shares}\n"
-            f"   Proceeds: {self.format_price(sell_value)}\n"
-            f"   Profit Locked: {self.format_dollars(profit_locked)}\n\n"
-            f"After selling:\n"
-            f"• Raise stop to breakeven on remaining shares\n"
-            f"• Let winners run\n\n"
-            f"IBD Rule: Take some profits on the way up to lock in gains."
+
+        # Build compact embed format
+        message = build_profit_embed(
+            symbol=context.symbol,
+            price=context.current_price,
+            entry_price=context.entry_price,
+            pnl_pct=context.pnl_pct,
+            target_name="TP1",
+            target_pct=tp1_pct,
+            days_held=context.days_in_position,
+            action="Sell 1/3, raise stop to breakeven",
+            ma_21=context.ma_21,
+            ma_50=context.ma_50,
+            market_regime=context.market_regime,
         )
-        
+
         self.set_cooldown(context.symbol, AlertSubtype.TP1)
-        
+
         return self.create_alert(
             context=context,
             alert_type=AlertType.PROFIT,
             subtype=AlertSubtype.TP1,
             message=message,
-            action="SELL 25% OF POSITION",
+            action="SELL 1/3 OF POSITION",
             priority="P1",
         )
     
@@ -196,47 +191,41 @@ class ProfitChecker(BaseChecker):
         # Skip if already sold at TP2
         if context.tp2_sold > 0:
             return None
-        
+
         # Check cooldown
         if self.is_on_cooldown(context.symbol, AlertSubtype.TP2):
             return None
-        
+
         # Get TP2 target
         tp2_pct = self.default_tp2_pct
         if position is not None:
             tp2_pct = getattr(position, 'tp2_pct', None) or self.default_tp2_pct
-        
+
         if context.pnl_pct < tp2_pct:
             return None
-        
-        # Calculate sell recommendation (25% of remaining - was 40% then 33%)
-        # IBD adjustment: More conservative to let winners run
-        remaining_shares = context.shares - (context.tp1_sold or 0)
-        shares_to_sell = int(remaining_shares * 0.25)
-        sell_value = shares_to_sell * context.current_price
-        profit_locked = shares_to_sell * (context.current_price - context.entry_price)
-        
-        message = (
-            f"💰💰 TP2 TARGET REACHED!\n\n"
-            f"Gain: {self.format_pct(context.pnl_pct)}\n"
-            f"Price: {self.format_price(context.current_price)}\n"
-            f"Entry: {self.format_price(context.entry_price)}\n\n"
-            f"▶ SELL 25% OF REMAINING\n"
-            f"   Shares to Sell: {shares_to_sell} of {remaining_shares} remaining\n"
-            f"   Proceeds: {self.format_price(sell_value)}\n"
-            f"   Profit Locked: {self.format_dollars(profit_locked)}\n\n"
-            f"After selling:\n"
-            f"• Consider trailing stop on final portion\n"
-            f"• Use 10-week MA as guide for remaining shares"
+
+        # Build compact embed format
+        message = build_profit_embed(
+            symbol=context.symbol,
+            price=context.current_price,
+            entry_price=context.entry_price,
+            pnl_pct=context.pnl_pct,
+            target_name="TP2",
+            target_pct=tp2_pct,
+            days_held=context.days_in_position,
+            action="Sell another 1/3, trail stop at 21 EMA",
+            ma_21=context.ma_21,
+            ma_50=context.ma_50,
+            market_regime=context.market_regime,
         )
-        
+
         self.set_cooldown(context.symbol, AlertSubtype.TP2)
-        
+
         return self.create_alert(
             context=context,
             alert_type=AlertType.PROFIT,
             subtype=AlertSubtype.TP2,
             message=message,
-            action="SELL 25% OF REMAINING",
+            action="SELL 1/3 OF REMAINING",
             priority="P1",
         )

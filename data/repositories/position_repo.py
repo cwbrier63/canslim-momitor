@@ -5,12 +5,15 @@ Phase 1: Database Foundation
 Provides CRUD operations and queries for Position entities.
 """
 
+import logging
 from datetime import datetime, date
 from typing import List, Optional, Dict, Any
 from sqlalchemy import and_, or_, func
 from sqlalchemy.orm import Session
 
 from canslim_monitor.data.models import Position
+
+logger = logging.getLogger('canslim.database')
 
 
 class PositionRepository:
@@ -119,10 +122,16 @@ class PositionRepository:
             Position.state >= 1
         ).order_by(Position.symbol).all()
     
-    def get_by_state(self, state: int) -> List[Position]:
-        """Get positions by specific state."""
+    def get_by_state(self, state: float) -> List[Position]:
+        """Get positions by specific state (supports float for State -1.5)."""
         return self.session.query(Position).filter(
             Position.state == state
+        ).order_by(Position.symbol).all()
+
+    def get_watching_exited(self) -> List[Position]:
+        """Get all positions in WATCHING_EXITED state (state = -1.5)."""
+        return self.session.query(Position).filter(
+            Position.state == -1.5
         ).order_by(Position.symbol).all()
     
     def get_by_portfolio(self, portfolio: str, include_closed: bool = False) -> List[Position]:
@@ -214,21 +223,56 @@ class PositionRepository:
     
     # ==================== UPDATE ====================
     
+    # Fields that trigger recalculation of avg_cost and P&L
+    ENTRY_FIELDS = {'e1_shares', 'e1_price', 'e2_shares', 'e2_price',
+                    'e3_shares', 'e3_price', 'tp1_sold', 'tp2_sold'}
+
     def update(self, position: Position, **kwargs) -> Position:
         """
         Update position attributes.
-        
+
         Args:
             position: Position instance to update
             **kwargs: Attributes to update
-        
+
         Returns:
             Updated Position instance
         """
+        # Check if any entry-related fields are being updated
+        needs_recalc = bool(set(kwargs.keys()) & self.ENTRY_FIELDS)
+
+        # Track if user explicitly provided certain fields (don't overwrite with calculated values)
+        user_provided_stop_price = 'stop_price' in kwargs and kwargs['stop_price'] is not None
+        user_provided_tp1_target = 'tp1_target' in kwargs and kwargs['tp1_target'] is not None
+        user_provided_tp2_target = 'tp2_target' in kwargs and kwargs['tp2_target'] is not None
+
+        logger.info(f"PositionRepo.update: {position.symbol} (id={position.id}) with {len(kwargs)} fields")
+
+        # Track key fields for logging
+        key_fields = {'stop_price', 'pivot', 'hard_stop_pct', 'pattern', 'base_stage'}
+
         for key, value in kwargs.items():
             if hasattr(position, key):
+                old_value = getattr(position, key, None)
                 setattr(position, key, value)
-        
+                # Log key fields at INFO level
+                if key in key_fields and old_value != value:
+                    logger.info(f"  {key}: {old_value} -> {value}")
+            else:
+                logger.warning(f"  {key}: SKIPPED (attribute not found on Position model)")
+
+        # Recalculate avg_cost and totals if entry data changed
+        if needs_recalc:
+            self._recalculate_position_totals(
+                position,
+                skip_stop_price=user_provided_stop_price,
+                skip_tp1_target=user_provided_tp1_target,
+                skip_tp2_target=user_provided_tp2_target
+            )
+            # Also recalculate P&L based on new avg_cost
+            if position.avg_cost and position.avg_cost > 0 and position.last_price:
+                position.current_pnl_pct = ((position.last_price - position.avg_cost) / position.avg_cost) * 100
+
         position.needs_sheet_sync = True
         self.session.flush()
         return position
@@ -358,40 +402,60 @@ class PositionRepository:
         self.session.flush()
         return position
     
-    def _recalculate_position_totals(self, position: Position) -> None:
-        """Recalculate total shares and average cost."""
+    def _recalculate_position_totals(
+        self,
+        position: Position,
+        skip_stop_price: bool = False,
+        skip_tp1_target: bool = False,
+        skip_tp2_target: bool = False
+    ) -> None:
+        """
+        Recalculate total shares and average cost.
+
+        Args:
+            position: Position to recalculate
+            skip_stop_price: If True, don't overwrite stop_price (user provided)
+            skip_tp1_target: If True, don't overwrite tp1_target (user provided)
+            skip_tp2_target: If True, don't overwrite tp2_target (user provided)
+        """
         total_shares = 0
         total_cost = 0.0
-        
+
         if position.e1_shares and position.e1_price:
             total_shares += position.e1_shares
             total_cost += position.e1_shares * position.e1_price
-        
+
         if position.e2_shares and position.e2_price:
             total_shares += position.e2_shares
             total_cost += position.e2_shares * position.e2_price
-        
+
         if position.e3_shares and position.e3_price:
             total_shares += position.e3_shares
             total_cost += position.e3_shares * position.e3_price
-        
+
         # Subtract sold shares
         if position.tp1_sold and position.tp1_price:
             total_shares -= position.tp1_sold
-        
+
         if position.tp2_sold and position.tp2_price:
             total_shares -= position.tp2_sold
-        
+
         position.total_shares = total_shares
-        
+
         if total_shares > 0 and total_cost > 0:
-            position.avg_cost = total_cost / (position.e1_shares or 0 + position.e2_shares or 0 + position.e3_shares or 0)
-            
-            # Calculate targets
+            # Calculate total shares bought (before any sells) for avg_cost
+            total_bought = (position.e1_shares or 0) + (position.e2_shares or 0) + (position.e3_shares or 0)
+            if total_bought > 0:
+                position.avg_cost = total_cost / total_bought
+
+            # Calculate targets (but respect user-provided values)
             if position.avg_cost:
-                position.stop_price = position.avg_cost * (1 - position.hard_stop_pct / 100)
-                position.tp1_target = position.avg_cost * (1 + position.tp1_pct / 100)
-                position.tp2_target = position.avg_cost * (1 + position.tp2_pct / 100)
+                if not skip_stop_price:
+                    position.stop_price = position.avg_cost * (1 - position.hard_stop_pct / 100)
+                if not skip_tp1_target:
+                    position.tp1_target = position.avg_cost * (1 + position.tp1_pct / 100)
+                if not skip_tp2_target:
+                    position.tp2_target = position.avg_cost * (1 + position.tp2_pct / 100)
     
     # ==================== DELETE ====================
     
@@ -452,10 +516,10 @@ class PositionRepository:
     def bulk_create(self, positions_data: List[Dict[str, Any]]) -> List[Position]:
         """
         Bulk create positions.
-        
+
         Args:
             positions_data: List of position attribute dicts
-        
+
         Returns:
             List of created Position instances
         """
@@ -464,6 +528,295 @@ class PositionRepository:
             position = Position(**data)
             self.session.add(position)
             positions.append(position)
-        
+
         self.session.flush()
         return positions
+
+    # ==================== STATE -1.5 (WATCHING_EXITED) OPERATIONS ====================
+
+    def transition_to_watching_exited(
+        self,
+        position: Position,
+        exit_price: float,
+        exit_reason: str,
+        notes: str = None
+    ) -> Position:
+        """
+        Transition position to State -1.5 (WATCHING_EXITED) for re-entry monitoring.
+
+        Called when position exits via stop loss or technical sell (NOT profit).
+        Preserves original pivot for retest detection.
+
+        Args:
+            position: The position being exited
+            exit_price: The price at exit
+            exit_reason: One of STOP_HIT, 50MA_BREAKDOWN, 10WMA_BREAKDOWN, MARKET_CORRECTION
+
+        Returns:
+            Updated position in State -1.5
+        """
+        from datetime import timedelta
+
+        # Preserve original pivot for retest detection
+        position.original_pivot = position.pivot
+
+        # Set exit/close data
+        position.close_date = date.today()
+        position.close_price = exit_price
+        position.close_reason = exit_reason
+        position.watching_exited_since = datetime.now()
+
+        # Calculate realized P&L
+        if position.avg_cost and position.avg_cost > 0:
+            position.realized_pnl_pct = ((exit_price - position.avg_cost) / position.avg_cost) * 100
+            if position.total_shares:
+                position.realized_pnl = (exit_price - position.avg_cost) * position.total_shares
+
+        # Reset MA test count for new monitoring
+        position.ma_test_count = 0
+
+        # Clear active position fields
+        position.total_shares = 0
+        position.e1_shares = 0
+        position.e2_shares = 0
+        position.e3_shares = 0
+        position.entry_date = None
+        position.stop_price = None
+
+        # Set state
+        position.state = -1.5
+        position.state_updated_at = datetime.now()
+        position.needs_sheet_sync = True
+
+        # Add note
+        exit_note = f"[{datetime.now().strftime('%Y-%m-%d')}] Exited to re-entry watch: {exit_reason} @ ${exit_price:.2f}"
+        if notes:
+            exit_note += f" - {notes}"
+        position.notes = f"{position.notes or ''}\n{exit_note}".strip()
+
+        self.session.flush()
+
+        logger.info(
+            f"{position.symbol}: Transitioned to WATCHING_EXITED "
+            f"(exit: {exit_reason} @ ${exit_price:.2f})"
+        )
+
+        return position
+
+    def remove_from_watching_exited(
+        self,
+        position: Position,
+        target_state: int = -2,
+        notes: str = None
+    ) -> Position:
+        """
+        Manually remove position from State -1.5 (WATCHING_EXITED).
+
+        Record is retained in database for historical reference.
+
+        Args:
+            position: The position to remove
+            target_state: -1 (CLOSED) or -2 (STOPPED_OUT/ARCHIVED)
+            notes: Optional notes explaining the removal
+
+        Returns:
+            Updated position
+        """
+        if position.state != -1.5:
+            raise ValueError(f"Position {position.symbol} is not in State -1.5")
+
+        if target_state not in [-1, -2]:
+            raise ValueError("Target state must be -1 (CLOSED) or -2 (ARCHIVED)")
+
+        # Append removal note
+        removal_note = f"[{datetime.now().strftime('%Y-%m-%d %H:%M')}] Removed from re-entry watch"
+        if notes:
+            removal_note += f": {notes}"
+
+        position.notes = f"{position.notes or ''}\n{removal_note}".strip()
+        position.state = target_state
+        position.state_updated_at = datetime.now()
+        position.needs_sheet_sync = True
+
+        self.session.flush()
+
+        state_name = "CLOSED" if target_state == -1 else "ARCHIVED"
+        logger.info(f"{position.symbol}: Removed from WATCHING_EXITED -> {state_name}")
+
+        return position
+
+    def return_to_watchlist(
+        self,
+        position: Position,
+        new_pivot: float,
+        notes: str = None
+    ) -> Position:
+        """
+        Return a State -1.5 position to regular watchlist (State 0) with new base.
+
+        Used when a previously exited stock forms a new base pattern.
+
+        Args:
+            position: The position to return
+            new_pivot: New pivot price for the fresh base
+            notes: Optional notes
+
+        Returns:
+            Updated position in State 0
+        """
+        if position.state != -1.5:
+            raise ValueError(f"Position {position.symbol} is not in State -1.5")
+
+        # Clear exit data
+        position.close_date = None
+        position.close_price = None
+        position.close_reason = None
+        position.watching_exited_since = None
+        position.ma_test_count = 0
+
+        # Set new watchlist data
+        position.state = 0
+        position.state_updated_at = datetime.now()
+        position.pivot = new_pivot
+        position.pivot_set_date = date.today()
+        position.watch_date = date.today()
+        position.needs_sheet_sync = True
+
+        # Add note
+        return_note = f"[{datetime.now().strftime('%Y-%m-%d')}] Returned to watchlist - new base @ ${new_pivot:.2f}"
+        if notes:
+            return_note += f" ({notes})"
+
+        position.notes = f"{position.notes or ''}\n{return_note}".strip()
+
+        self.session.flush()
+
+        logger.info(f"{position.symbol}: Returned to WATCHLIST with pivot ${new_pivot:.2f}")
+
+        return position
+
+    def reenter_from_watching_exited(
+        self,
+        position: Position,
+        shares: int,
+        entry_price: float,
+        stop_price: float,
+        entry_date: date = None,
+        notes: str = None
+    ) -> Position:
+        """
+        Re-enter a position from State -1.5 (new Entry 1).
+
+        Used when MA bounce or pivot retest provides re-entry opportunity.
+
+        Args:
+            position: The position to re-enter
+            shares: Number of shares
+            entry_price: Re-entry price
+            stop_price: Stop loss price
+            entry_date: Entry date (defaults to today)
+            notes: Optional notes
+
+        Returns:
+            Updated position in State 1
+        """
+        if position.state != -1.5:
+            raise ValueError(f"Position {position.symbol} is not in State -1.5")
+
+        entry_date = entry_date or date.today()
+
+        # Set entry data
+        position.e1_shares = shares
+        position.e1_price = entry_price
+        position.e1_date = entry_date
+        position.entry_date = entry_date
+        position.stop_price = stop_price
+
+        # Clear exit data (keeping original_pivot for reference)
+        position.close_date = None
+        position.close_price = None
+        position.close_reason = None
+        position.watching_exited_since = None
+
+        # Recalculate
+        self._recalculate_position_totals(position, skip_stop_price=True)
+
+        # Set state
+        position.state = 1
+        position.state_updated_at = datetime.now()
+        position.breakout_date = entry_date
+        position.needs_sheet_sync = True
+
+        # Add note
+        reentry_note = f"[{entry_date.strftime('%Y-%m-%d')}] RE-ENTRY: {shares} shares @ ${entry_price:.2f}"
+        if notes:
+            reentry_note += f" ({notes})"
+
+        position.notes = f"{position.notes or ''}\n{reentry_note}".strip()
+
+        self.session.flush()
+
+        logger.info(
+            f"{position.symbol}: RE-ENTERED from WATCHING_EXITED "
+            f"({shares} shares @ ${entry_price:.2f})"
+        )
+
+        return position
+
+    def expire_watching_exited(self, days_threshold: int = 60) -> int:
+        """
+        Archive positions in State -1.5 that have been there too long.
+
+        Called daily by maintenance task.
+
+        Args:
+            days_threshold: Days after which to auto-expire (default 60)
+
+        Returns:
+            Number of positions expired
+        """
+        from datetime import timedelta
+
+        cutoff = datetime.now() - timedelta(days=days_threshold)
+
+        expired = self.session.query(Position).filter(
+            Position.state == -1.5,
+            Position.watching_exited_since < cutoff
+        ).all()
+
+        for pos in expired:
+            pos.state = -2  # Archive to STOPPED_OUT
+            pos.state_updated_at = datetime.now()
+            pos.needs_sheet_sync = True
+            pos.notes = f"{pos.notes or ''}\n[{datetime.now().strftime('%Y-%m-%d')}] Auto-expired from re-entry watch after {days_threshold} days".strip()
+
+            logger.info(
+                f"{pos.symbol}: Expired from WATCHING_EXITED after {days_threshold} days"
+            )
+
+        self.session.flush()
+        return len(expired)
+
+    def increment_ma_test_count(self, position: Position) -> int:
+        """
+        Increment the MA test count for a State -1.5 position.
+
+        Called when an MA bounce is detected. After 3 tests, probability decreases.
+
+        Args:
+            position: Position to update
+
+        Returns:
+            New MA test count
+        """
+        if position.state != -1.5:
+            return position.ma_test_count or 0
+
+        position.ma_test_count = (position.ma_test_count or 0) + 1
+        self.session.flush()
+
+        logger.debug(
+            f"{position.symbol}: MA test count incremented to {position.ma_test_count}"
+        )
+
+        return position.ma_test_count

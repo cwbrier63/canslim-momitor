@@ -967,7 +967,11 @@ class KanbanMainWindow(QMainWindow):
             column.card_context_menu.connect(self._on_card_context_menu)
             column.card_alert_clicked.connect(self._on_alert_clicked)
             column.add_clicked.connect(self._on_add_clicked)
-            
+
+            # Connect toggle signal for watching column (state 0)
+            if state == 0:
+                column.view_toggled.connect(self._on_watching_column_toggled)
+
             self.columns[state] = column
             board_layout.addWidget(column)
         
@@ -1149,6 +1153,10 @@ class KanbanMainWindow(QMainWindow):
             self.closed_panel.clear_cards()
             self._cards_by_symbol.clear()  # Clear card tracking
 
+            # Check if watching column is showing Exited Watch (-1.5)
+            watching_column = self.columns.get(0)
+            showing_exited_watch = watching_column and watching_column.is_showing_exited_watch()
+
             # Add cards to appropriate columns
             closed_count = 0
             for pos in positions:
@@ -1160,11 +1168,25 @@ class KanbanMainWindow(QMainWindow):
                 if pos.symbol:
                     self._cards_by_symbol[pos.symbol] = card
 
-                if pos.state < 0:
-                    # Closed/stopped positions
+                # Handle State -1.5 positions
+                if pos.state == -1.5:
+                    if showing_exited_watch and watching_column:
+                        # Show in watching column when toggled to Exited Watch
+                        watching_column.add_card(card)
+                    else:
+                        # Otherwise show in closed panel
+                        self.closed_panel.add_card(card)
+                        closed_count += 1
+                    self.logger.debug(f"Added exited watch position: {pos.symbol}")
+                elif pos.state < 0:
+                    # Other closed/stopped positions (-1, -2)
                     self.closed_panel.add_card(card)
                     closed_count += 1
                     self.logger.debug(f"Added closed position: {pos.symbol} (state {pos.state})")
+                elif pos.state == 0 and showing_exited_watch:
+                    # If watching column is showing -1.5, State 0 goes to closed panel temporarily
+                    # Actually, this doesn't make sense. Let's skip State 0 when showing -1.5
+                    pass  # Don't show State 0 cards when in Exited Watch mode
                 elif pos.state in self.columns:
                     self.columns[pos.state].add_card(card)
             
@@ -1931,7 +1953,59 @@ class KanbanMainWindow(QMainWindow):
             f"Created Outcome for {position.symbol}: {trade_outcome} "
             f"({gross_pct:.1f}%, {holding_days} days)"
         )
-    
+
+    def _on_watching_column_toggled(self, new_state: float):
+        """
+        Handle toggle between Watching (0) and Exited Watch (-1.5) in the first column.
+
+        Args:
+            new_state: The state now being displayed (0 or -1.5)
+        """
+        self.logger.info(f"Watching column toggled to state: {new_state}")
+
+        # Get the watching column (stored under key 0)
+        watching_column = self.columns.get(0)
+        if not watching_column:
+            return
+
+        # Clear existing cards in the column
+        watching_column.clear_cards()
+
+        # Load positions for the new state
+        session = self.db.get_new_session()
+        try:
+            repos = RepositoryManager(session)
+
+            if new_state == -1.5:
+                # Load State -1.5 positions
+                positions = repos.positions.get_watching_exited()
+            else:
+                # Load State 0 positions
+                positions = repos.positions.get_by_state(0)
+
+            self.logger.info(f"Loading {len(positions)} positions for state {new_state}")
+
+            # Get alerts for these positions
+            position_ids = [pos.id for pos in positions]
+            latest_alerts = self._get_latest_alerts_for_positions(session, position_ids)
+
+            # Add cards to the column
+            for pos in positions:
+                latest_alert = latest_alerts.get(pos.id)
+                card = self._create_card(pos, latest_alert=latest_alert)
+
+                # Track card by symbol
+                if pos.symbol:
+                    self._cards_by_symbol[pos.symbol] = card
+
+                watching_column.add_card(card)
+
+            state_name = "Exited Watch" if new_state == -1.5 else "Watching"
+            self.status_bar.showMessage(f"Showing {len(positions)} {state_name} positions")
+
+        finally:
+            session.close()
+
     def _on_card_clicked(self, position_id: int):
         """Handle card click - show quick info."""
         self.logger.debug(f"Card clicked: {position_id}")
@@ -2127,14 +2201,53 @@ class KanbanMainWindow(QMainWindow):
                 stop_action.triggered.connect(
                     lambda: self._trigger_transition(position_id, position.state, -2)
                 )
-                
+
+                # Exit to Re-entry Watch (State -1.5)
+                reentry_watch_action = menu.addAction("👁️ Exit to Re-entry Watch")
+                reentry_watch_action.setToolTip("Exit position but monitor for MA bounce or pivot retest re-entry")
+                reentry_watch_action.triggered.connect(
+                    lambda: self._exit_to_reentry_watch(position_id)
+                )
+
                 close_action = menu.addAction("✅ Close Position")
                 close_action.triggered.connect(
                     lambda: self._trigger_transition(position_id, position.state, -1)
                 )
-            
+
+            # State -1.5 (Exited Watch) specific actions
+            elif position.state == -1.5:
+                # Re-enter from watching exited
+                reenter_action = menu.addAction("🚀 Re-enter Position")
+                reenter_action.setToolTip("Re-enter this position (MA bounce or pivot retest)")
+                reenter_action.triggered.connect(
+                    lambda: self._reenter_from_watching_exited(position_id)
+                )
+
+                # Return to regular watchlist with new pivot
+                return_watchlist_action = menu.addAction("📋 Return to Watchlist")
+                return_watchlist_action.setToolTip("Move back to watchlist with a new pivot (new base forming)")
+                return_watchlist_action.triggered.connect(
+                    lambda: self._return_to_watchlist_from_watching_exited(position_id)
+                )
+
+                menu.addSeparator()
+
+                # Archive (give up on re-entry)
+                archive_action = menu.addAction("🗄️ Archive (Give Up)")
+                archive_action.setToolTip("Stop monitoring - move to Stopped Out")
+                archive_action.triggered.connect(
+                    lambda: self._remove_from_watching_exited(position_id, -2)
+                )
+
+                # Close (manual removal)
+                close_action = menu.addAction("✅ Close (Remove)")
+                close_action.setToolTip("Remove from re-entry watch - move to Closed")
+                close_action.triggered.connect(
+                    lambda: self._remove_from_watching_exited(position_id, -1)
+                )
+
             menu.addSeparator()
-            
+
             # Delete action
             delete_action = menu.addAction("🗑️ Delete")
             delete_action.triggered.connect(lambda: self._delete_position(position_id))
@@ -2347,10 +2460,14 @@ class KanbanMainWindow(QMainWindow):
         """
         Run breakout checks for watchlist (State 0) positions.
 
+        Also runs WatchlistAltEntryChecker for MA pullback opportunities
+        on stocks that were previously extended.
+
         Returns:
             Tuple of (alerts, position_summary, check_summary)
         """
         from canslim_monitor.core.position_monitor.breakout_checker_tool import BreakoutCheckerTool
+        from canslim_monitor.services.technical_data_service import TechnicalDataService
 
         # Get volume data from position attributes
         volume = getattr(position, 'last_volume', 0) or 0
@@ -2358,13 +2475,35 @@ class KanbanMainWindow(QMainWindow):
         high = getattr(position, 'last_high', current_price) or current_price
         low = getattr(position, 'last_low', current_price) or current_price
 
-        # Create breakout checker tool
+        # Fetch technical data (MAs) for alt entry checks
+        technical_data = {}
+        polygon_api_key = (
+            self.config.get('polygon', {}).get('api_key') or
+            self.config.get('market_data', {}).get('api_key')
+        )
+        if polygon_api_key:
+            try:
+                tech_service = TechnicalDataService(
+                    polygon_api_key=polygon_api_key,
+                    cache_duration_hours=4,
+                    logger=self.logger
+                )
+                technical_data = tech_service.get_technical_data(position.symbol)
+                self.logger.debug(
+                    f"Fetched MAs for {position.symbol}: "
+                    f"21={technical_data.get('ma_21')}, "
+                    f"50={technical_data.get('ma_50')}"
+                )
+            except Exception as e:
+                self.logger.warning(f"Could not fetch technical data for alt entry: {e}")
+
+        # Create breakout checker tool (also includes WatchlistAltEntryChecker)
         checker_tool = BreakoutCheckerTool(
             config=self.config,
             logger=self.logger
         )
 
-        # Run breakout checks
+        # Run breakout checks + alt entry checks
         alerts = checker_tool.check_position(
             position=position,
             current_price=current_price,
@@ -2373,6 +2512,7 @@ class KanbanMainWindow(QMainWindow):
             high=high,
             low=low,
             market_regime=market_regime,
+            technical_data=technical_data,
         )
 
         # Build position summary for dialog header (watchlist-specific)
@@ -2395,15 +2535,23 @@ class KanbanMainWindow(QMainWindow):
         # Calculate RVOL for display
         rvol = checker_tool._calculate_rvol(volume, avg_volume) if volume > 0 else 0
 
+        # Merge MA data with volume data
+        merged_technical = {
+            'pivot': pivot,
+            'buy_zone_top': buy_zone_top,
+            'volume': volume,
+            'avg_volume': avg_volume,
+            'rvol': rvol,
+        }
+        # Add MA data if available
+        if technical_data:
+            merged_technical['ma_21'] = technical_data.get('ma_21') or technical_data.get('ema_21')
+            merged_technical['ma_50'] = technical_data.get('ma_50')
+            merged_technical['ma_200'] = technical_data.get('ma_200')
+
         check_summary = {
-            'checkers_run': ['breakout'],
-            'technical_data': {
-                'pivot': pivot,
-                'buy_zone_top': buy_zone_top,
-                'volume': volume,
-                'avg_volume': avg_volume,
-                'rvol': rvol,
-            },
+            'checkers_run': ['breakout', 'alt_entry'],  # Now also checks alt entry
+            'technical_data': merged_technical,
             'is_breakout_check': True,  # Flag for dialog to customize display
         }
 
@@ -2485,7 +2633,297 @@ class KanbanMainWindow(QMainWindow):
     def _trigger_transition(self, position_id: int, from_state: int, to_state: int):
         """Trigger a state transition (reuse existing drop logic)."""
         self._on_position_dropped(position_id, from_state, to_state)
-    
+
+    def _exit_to_reentry_watch(self, position_id: int):
+        """
+        Exit a position to State -1.5 (WATCHING_EXITED) for re-entry monitoring.
+
+        Shows a dialog to collect exit price and reason, then transitions the
+        position using the specialized repository method.
+        """
+        from canslim_monitor.gui.transition_dialogs import ExitToReentryWatchDialog
+
+        session = self.db.get_new_session()
+        try:
+            repos = RepositoryManager(session)
+            position = repos.positions.get_by_id(position_id)
+
+            if not position:
+                self.logger.error(f"Position {position_id} not found")
+                return
+
+            if position.state < 1:
+                QMessageBox.warning(
+                    self,
+                    "Invalid State",
+                    f"Position {position.symbol} is not in an active state (state={position.state}).\n"
+                    "Only positions in states 1-6 can be exited to re-entry watch."
+                )
+                return
+
+            # Prepare current data for dialog
+            current_data = {
+                'symbol': position.symbol,
+                'pivot': position.pivot,
+                'stop_price': position.stop_price,
+                'avg_cost': position.avg_cost,
+                'total_shares': position.total_shares,
+                'last_price': position.last_price,
+                'entry_date': position.entry_date,
+            }
+
+            # Show dialog
+            dialog = ExitToReentryWatchDialog(
+                symbol=position.symbol,
+                current_data=current_data,
+                parent=self
+            )
+
+            if dialog.exec() != QDialog.DialogCode.Accepted:
+                self.logger.info("Exit to re-entry watch cancelled")
+                return
+
+            result = dialog.get_result()
+            exit_price = result['exit_price']
+            exit_reason = result['exit_reason']
+            notes = result.get('notes')
+
+            # Use the repository method to handle the transition
+            repos.positions.transition_to_watching_exited(
+                position=position,
+                exit_price=exit_price,
+                exit_reason=exit_reason,
+                notes=notes
+            )
+
+            session.commit()
+
+            self.logger.info(
+                f"{position.symbol}: Exited to re-entry watch "
+                f"(reason={exit_reason}, price=${exit_price:.2f})"
+            )
+            self.status_bar.showMessage(
+                f"{position.symbol} moved to Exited Watch - monitoring for re-entry",
+                5000
+            )
+
+            # Reload positions to update display
+            self._load_positions()
+
+        except Exception as e:
+            session.rollback()
+            self.logger.error(f"Error exiting to re-entry watch: {e}")
+            QMessageBox.critical(
+                self,
+                "Error",
+                f"Failed to exit position to re-entry watch:\n{str(e)}"
+            )
+        finally:
+            session.close()
+
+    def _reenter_from_watching_exited(self, position_id: int):
+        """
+        Re-enter a position from State -1.5 (WATCHING_EXITED).
+
+        Shows a dialog to collect entry shares, price, and stop price.
+        """
+        session = self.db.get_new_session()
+        try:
+            repos = RepositoryManager(session)
+            position = repos.positions.get_by_id(position_id)
+
+            if not position:
+                self.logger.error(f"Position {position_id} not found")
+                return
+
+            if position.state != -1.5:
+                QMessageBox.warning(
+                    self,
+                    "Invalid State",
+                    f"Position {position.symbol} is not in Exited Watch state."
+                )
+                return
+
+            # Use the existing TransitionDialog for -1.5 → 1 transition
+            current_data = {
+                'symbol': position.symbol,
+                'pivot': position.original_pivot or position.pivot,
+                'last_price': position.last_price,
+                'close_price': position.close_price,
+                'close_reason': position.close_reason,
+            }
+
+            dialog = TransitionDialog(
+                symbol=position.symbol,
+                from_state=-1.5,
+                to_state=1,
+                current_data=current_data,
+                parent=self
+            )
+
+            if dialog.exec() != QDialog.DialogCode.Accepted:
+                self.logger.info("Re-entry cancelled")
+                return
+
+            result = dialog.get_result()
+
+            # Use the repository method
+            repos.positions.reenter_from_watching_exited(
+                position=position,
+                shares=result.get('e1_shares', 0),
+                entry_price=result.get('e1_price', 0),
+                stop_price=result.get('stop_price', 0),
+                entry_date=result.get('entry_date'),
+                notes=result.get('notes')
+            )
+
+            session.commit()
+
+            self.logger.info(f"{position.symbol}: Re-entered from Exited Watch")
+            self.status_bar.showMessage(f"{position.symbol} re-entered!", 5000)
+
+            self._load_positions()
+
+        except Exception as e:
+            session.rollback()
+            self.logger.error(f"Error re-entering position: {e}")
+            QMessageBox.critical(self, "Error", f"Failed to re-enter position:\n{str(e)}")
+        finally:
+            session.close()
+
+    def _return_to_watchlist_from_watching_exited(self, position_id: int):
+        """
+        Return a State -1.5 position to regular watchlist (State 0) with new pivot.
+        """
+        session = self.db.get_new_session()
+        try:
+            repos = RepositoryManager(session)
+            position = repos.positions.get_by_id(position_id)
+
+            if not position:
+                self.logger.error(f"Position {position_id} not found")
+                return
+
+            if position.state != -1.5:
+                QMessageBox.warning(
+                    self,
+                    "Invalid State",
+                    f"Position {position.symbol} is not in Exited Watch state."
+                )
+                return
+
+            # Get new pivot price from user
+            from PyQt6.QtWidgets import QInputDialog
+
+            new_pivot, ok = QInputDialog.getDouble(
+                self,
+                f"New Pivot for {position.symbol}",
+                "Enter the new pivot price for the fresh base pattern:",
+                position.original_pivot or position.pivot or position.last_price or 100.0,
+                0.01,
+                99999.99,
+                2
+            )
+
+            if not ok:
+                return
+
+            # Optional notes
+            notes, ok = QInputDialog.getText(
+                self,
+                "Notes (Optional)",
+                "Add notes about the new base pattern:"
+            )
+
+            repos.positions.return_to_watchlist(
+                position=position,
+                new_pivot=new_pivot,
+                notes=notes if ok and notes else None
+            )
+
+            session.commit()
+
+            self.logger.info(f"{position.symbol}: Returned to watchlist with pivot ${new_pivot:.2f}")
+            self.status_bar.showMessage(
+                f"{position.symbol} returned to watchlist with pivot ${new_pivot:.2f}",
+                5000
+            )
+
+            self._load_positions()
+
+        except Exception as e:
+            session.rollback()
+            self.logger.error(f"Error returning to watchlist: {e}")
+            QMessageBox.critical(self, "Error", f"Failed to return to watchlist:\n{str(e)}")
+        finally:
+            session.close()
+
+    def _remove_from_watching_exited(self, position_id: int, target_state: int):
+        """
+        Remove a position from State -1.5 (WATCHING_EXITED).
+
+        Args:
+            position_id: Position ID
+            target_state: -1 (CLOSED) or -2 (ARCHIVED/STOPPED_OUT)
+        """
+        session = self.db.get_new_session()
+        try:
+            repos = RepositoryManager(session)
+            position = repos.positions.get_by_id(position_id)
+
+            if not position:
+                self.logger.error(f"Position {position_id} not found")
+                return
+
+            if position.state != -1.5:
+                QMessageBox.warning(
+                    self,
+                    "Invalid State",
+                    f"Position {position.symbol} is not in Exited Watch state."
+                )
+                return
+
+            # Confirm action
+            state_name = "Closed" if target_state == -1 else "Stopped Out (Archive)"
+            reply = QMessageBox.question(
+                self,
+                f"Remove from Re-entry Watch",
+                f"Remove {position.symbol} from re-entry watch and move to '{state_name}'?\n\n"
+                "This will stop monitoring for re-entry opportunities.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            )
+
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+
+            # Optional notes
+            from PyQt6.QtWidgets import QInputDialog
+            notes, ok = QInputDialog.getText(
+                self,
+                "Notes (Optional)",
+                "Add notes about why you're removing from watch:"
+            )
+
+            repos.positions.remove_from_watching_exited(
+                position=position,
+                target_state=target_state,
+                notes=notes if ok and notes else None
+            )
+
+            session.commit()
+
+            self.logger.info(f"{position.symbol}: Removed from Exited Watch -> {state_name}")
+            self.status_bar.showMessage(f"{position.symbol} moved to {state_name}", 5000)
+
+            self._load_positions()
+
+        except Exception as e:
+            session.rollback()
+            self.logger.error(f"Error removing from watching exited: {e}")
+            QMessageBox.critical(self, "Error", f"Failed to remove position:\n{str(e)}")
+        finally:
+            session.close()
+
     def _show_score_details(self, position_id: int):
         """Show detailed score breakdown for a position."""
         import json

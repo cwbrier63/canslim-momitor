@@ -133,7 +133,7 @@ class ServiceStatusBar(QWidget):
     # Emits: state string like "running", "stopped", "not_installed", "foreground"
     service_state_changed = pyqtSignal(str)
     
-    REFRESH_INTERVAL_MS = 5000  # 5 seconds
+    REFRESH_INTERVAL_MS = 60000  # 60 seconds - service status rarely changes
     
     def __init__(
         self,

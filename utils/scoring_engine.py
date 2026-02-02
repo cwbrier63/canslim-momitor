@@ -141,17 +141,22 @@ class ScoringEngine:
     
     def _find_config(self) -> str:
         """Find config file in common locations."""
+        # Get the package root directory (parent of utils/)
+        package_root = os.path.dirname(os.path.dirname(__file__))
+
         search_paths = [
             "scoring_config.yaml",
             "config/scoring_config.yaml",
             "../scoring_config.yaml",
             os.path.join(os.path.dirname(__file__), "scoring_config.yaml"),
+            # Search in package config directory
+            os.path.join(package_root, "config", "scoring_config.yaml"),
         ]
-        
+
         for path in search_paths:
             if os.path.exists(path):
                 return path
-        
+
         raise FileNotFoundError(
             "scoring_config.yaml not found. Searched: " + ", ".join(search_paths)
         )

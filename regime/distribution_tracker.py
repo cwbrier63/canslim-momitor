@@ -91,16 +91,24 @@ class DistributionDayResult:
     expired_d_days: int
     stalling_days_found: int   # Track stalling days separately
     raw_count: int = None      # Raw detected count (before overrides)
-    
+    expiration_details: List[Dict] = None  # Details of expirations today
+
     def __post_init__(self):
         # Default raw_count to len(active_dates) if not set
         if self.raw_count is None:
             self.raw_count = len(self.active_dates)
-    
+        if self.expiration_details is None:
+            self.expiration_details = []
+
     @property
     def has_override(self) -> bool:
         """True if an override is affecting the count."""
         return self.active_count != self.raw_count
+
+    @property
+    def had_expirations(self) -> bool:
+        """True if any D-days expired in this update."""
+        return self.expired_d_days > 0
 
 
 @dataclass
@@ -113,14 +121,33 @@ class CombinedDistributionData:
     trend: DDayTrend
     spy_dates: List[date]
     qqq_dates: List[date]
-    
+
+    # Expiration tracking (for phase transition detection)
+    spy_expired_today: int = 0
+    qqq_expired_today: int = 0
+    expiration_details: List[Dict] = None
+
+    def __post_init__(self):
+        if self.expiration_details is None:
+            self.expiration_details = []
+
     @property
     def total_count(self) -> int:
         return self.spy_count + self.qqq_count
-    
+
     @property
     def total_5day_delta(self) -> int:
         return self.spy_5day_delta + self.qqq_5day_delta
+
+    @property
+    def total_expired_today(self) -> int:
+        """Total D-days that expired today."""
+        return self.spy_expired_today + self.qqq_expired_today
+
+    @property
+    def had_expirations(self) -> bool:
+        """True if any D-days expired today."""
+        return self.total_expired_today > 0
 
 
 class DistributionDayTracker:
@@ -360,20 +387,22 @@ class DistributionDayTracker:
                         logger.info(f"New distribution day: {symbol} {bar_date} ({pct_change:+.2f}%)")
         
         # Expire old distribution days
-        expired_count = self._expire_distribution_days(symbol, current_close, current_dt, daily_bars)
-        
+        expired_count, expiration_details = self._expire_distribution_days(
+            symbol, current_close, current_dt, daily_bars
+        )
+
         self.db.commit()
-        
+
         # Get current active count and dates
         active_count, active_dates, raw_count = self._get_active_distribution_days(symbol)
-        
+
         if active_count != raw_count:
             logger.info(f"{symbol}: Display count={active_count}, Raw detected={raw_count} (override active)")
-        
+
         # Get count from 5 days ago for trend
         count_5_ago = self._get_count_n_days_ago(symbol, self.trend_days, current_dt)
         delta = active_count - count_5_ago
-        
+
         return DistributionDayResult(
             symbol=symbol,
             active_count=active_count,
@@ -383,7 +412,8 @@ class DistributionDayTracker:
             new_d_days_found=new_d_days,
             expired_d_days=expired_count,
             stalling_days_found=new_stalling_days,
-            raw_count=raw_count
+            raw_count=raw_count,
+            expiration_details=expiration_details
         )
     
     def _expire_distribution_days(
@@ -392,38 +422,48 @@ class DistributionDayTracker:
         current_close: float,
         current_date: date,
         daily_bars: List[DailyBar]
-    ) -> int:
+    ) -> Tuple[int, List[Dict]]:
         """
         Mark distribution days as expired based on time or rally.
-        
+
         Returns:
-            Number of D-days expired
+            Tuple of (expired_count, expiration_details)
+            - expired_count: Number of D-days expired
+            - expiration_details: List of dicts with expiration info
         """
         expired_count = 0
-        
+        expiration_details = []
+
         active_days = self.db.query(DistributionDay).filter(
             DistributionDay.symbol == symbol,
             DistributionDay.expired == False
         ).all()
-        
+
         # Build date->bar lookup for accurate trading day counting
         bar_dates = {bar.date: bar for bar in daily_bars}
-        
+
         for d_day in active_days:
             # Count trading days elapsed
             trading_days_elapsed = self._count_trading_days(
                 d_day.date, current_date, bar_dates
             )
-            
+
             # Time expiration: 25 trading days
             if trading_days_elapsed >= self.lookback_days:
                 d_day.expired = True
                 d_day.expiry_reason = 'TIME'
                 d_day.expiry_date = current_date
                 expired_count += 1
+                expiration_details.append({
+                    'symbol': symbol,
+                    'date': d_day.date,
+                    'reason': 'TIME',
+                    'days_elapsed': trading_days_elapsed,
+                    'close_price': d_day.close_price
+                })
                 logger.info(f"D-day expired (time): {symbol} {d_day.date}")
                 continue
-            
+
             # Rally expiration: 5% rally from D-day close
             rally_pct = (current_close - d_day.close_price) / d_day.close_price * 100
             if rally_pct >= self.rally_expiration_pct:
@@ -431,9 +471,16 @@ class DistributionDayTracker:
                 d_day.expiry_reason = 'RALLY'
                 d_day.expiry_date = current_date
                 expired_count += 1
+                expiration_details.append({
+                    'symbol': symbol,
+                    'date': d_day.date,
+                    'reason': 'RALLY',
+                    'rally_pct': rally_pct,
+                    'close_price': d_day.close_price
+                })
                 logger.info(f"D-day expired (rally {rally_pct:.1f}%): {symbol} {d_day.date}")
-        
-        return expired_count
+
+        return expired_count, expiration_details
     
     def _count_trading_days(
         self,
@@ -611,16 +658,29 @@ class DistributionDayTracker:
         
         self.save_daily_counts(sp500_result, nasdaq_result, calc_date)
         
-        # Determine trend
+        # Determine trend - consider both delta AND absolute count
         total_delta = sp500_result.delta_5_day + nasdaq_result.delta_5_day
-        
+        total_count = sp500_result.active_count + nasdaq_result.active_count
+
         if total_delta < 0:
             trend = DDayTrend.IMPROVING
         elif total_delta > 0:
             trend = DDayTrend.WORSENING
         else:
-            trend = DDayTrend.FLAT
-        
+            # Delta is 0 - classify by absolute count level
+            if total_count <= 3:
+                trend = DDayTrend.HEALTHY
+            elif total_count <= 5:
+                trend = DDayTrend.STABLE
+            else:
+                trend = DDayTrend.ELEVATED_STABLE
+
+        # Combine expiration details from both symbols
+        all_expirations = (
+            sp500_result.expiration_details +
+            nasdaq_result.expiration_details
+        )
+
         return CombinedDistributionData(
             spy_count=sp500_result.active_count,
             qqq_count=nasdaq_result.active_count,
@@ -628,7 +688,10 @@ class DistributionDayTracker:
             qqq_5day_delta=nasdaq_result.delta_5_day,
             trend=trend,
             spy_dates=sp500_result.active_dates,
-            qqq_dates=nasdaq_result.active_dates
+            qqq_dates=nasdaq_result.active_dates,
+            spy_expired_today=sp500_result.expired_d_days,
+            qqq_expired_today=nasdaq_result.expired_d_days,
+            expiration_details=all_expirations
         )
     
     def get_distribution_day_details(self, symbol: str) -> List[Dict]:

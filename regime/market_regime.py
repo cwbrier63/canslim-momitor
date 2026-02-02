@@ -26,7 +26,21 @@ from datetime import datetime, date
 from dataclasses import dataclass, field
 from typing import Dict, Tuple, Optional
 
+try:
+    import pytz
+    ET_TIMEZONE = pytz.timezone('America/New_York')
+except ImportError:
+    ET_TIMEZONE = None
+
 from .models_regime import RegimeType, TrendType, DDayTrend, EntryRiskLevel
+
+
+def get_eastern_time() -> datetime:
+    """Get current time in Eastern Time zone."""
+    if ET_TIMEZONE:
+        return datetime.now(ET_TIMEZONE)
+    # Fallback to local time if pytz not available
+    return datetime.now()
 
 logger = logging.getLogger(__name__)
 
@@ -297,13 +311,21 @@ class MarketRegimeCalculator:
     def calculate_trend_score(self, trend: DDayTrend) -> float:
         """
         Score distribution day trend.
-        
-        IMPROVING (D-days decreasing): +1
-        WORSENING (D-days increasing): -1
-        FLAT: 0
+
+        IMPROVING (D-days decreasing): +1.0
+        HEALTHY (low count 0-3, stable): +0.5
+        STABLE (moderate count 4-5, stable): 0.0
+        ELEVATED_STABLE (high count 6+, stable): -0.5
+        WORSENING (D-days increasing): -1.0
         """
         if trend == DDayTrend.IMPROVING:
             return 1.0
+        elif trend == DDayTrend.HEALTHY:
+            return 0.5
+        elif trend == DDayTrend.STABLE:
+            return 0.0
+        elif trend == DDayTrend.ELEVATED_STABLE:
+            return -0.5
         elif trend == DDayTrend.WORSENING:
             return -1.0
         else:
@@ -436,7 +458,7 @@ class MarketRegimeCalculator:
             distribution_data=distribution,
             overnight_data=overnight,
             component_scores=component_scores,
-            timestamp=datetime.now(),
+            timestamp=get_eastern_time(),  # Use ET for consistent display
             ftd_data=ftd_data,
             market_phase=market_phase,
             regime_trend=regime_trend,
@@ -592,8 +614,9 @@ if __name__ == '__main__':
     scenarios = [
         ("Best case (bullish)", 1, 1, DDayTrend.IMPROVING, 0.5, 0.7, 0.3),
         ("Worst case (bearish)", 6, 7, DDayTrend.WORSENING, -0.8, -1.2, -0.6),
-        ("Mixed neutral", 3, 4, DDayTrend.FLAT, 0.1, -0.1, 0.05),
-        ("Low D-days, flat futures", 2, 1, DDayTrend.FLAT, 0.0, 0.0, 0.0),
+        ("Low count, stable", 2, 3, DDayTrend.HEALTHY, 0.1, -0.1, 0.05),
+        ("Moderate count, stable", 4, 5, DDayTrend.STABLE, 0.0, 0.0, 0.0),
+        ("High D-days but stable", 6, 6, DDayTrend.ELEVATED_STABLE, 0.3, 0.4, 0.2),
         ("High D-days, strong futures", 5, 6, DDayTrend.WORSENING, 0.8, 1.0, 0.5),
     ]
     
@@ -666,8 +689,12 @@ def calculate_entry_risk_score(
     # Improving trend = lower risk
     if distribution_data.trend == DDayTrend.IMPROVING:
         score += 0.35
-    elif distribution_data.trend == DDayTrend.FLAT:
-        score += 0.10
+    elif distribution_data.trend == DDayTrend.HEALTHY:
+        score += 0.20  # Low count, stable = good
+    elif distribution_data.trend == DDayTrend.STABLE:
+        score += 0.10  # Moderate count, stable = ok
+    elif distribution_data.trend == DDayTrend.ELEVATED_STABLE:
+        score -= 0.10  # High count but stable = caution
     elif distribution_data.trend == DDayTrend.WORSENING:
         score -= 0.35
     

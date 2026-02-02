@@ -15,7 +15,7 @@ import time
 from datetime import datetime
 from typing import Dict, Any, Optional
 
-from .threads import BreakoutThread, PositionThread, MarketThread
+from .threads import BreakoutThread, PositionThread, MarketThread, MaintenanceThread
 from .ipc import create_pipe_server
 
 # Phase 2 dependencies
@@ -78,7 +78,10 @@ class ServiceController:
         self.scoring_engine = None
         self.position_sizer = None
         self.alert_service = None
-        
+
+        # Market data client (Polygon/Massive)
+        self.polygon_client = None
+
         # Tracking
         self._start_time: Optional[datetime] = None
         self._is_running = False
@@ -102,7 +105,8 @@ class ServiceController:
         self._init_database()
         self._init_ibkr()
         self._init_discord()
-        
+        self._init_polygon()
+
         # Initialize Phase 2 components
         self._init_scoring_engine()
         self._init_position_sizer()
@@ -202,17 +206,36 @@ class ServiceController:
             
             self.logger.info(f"IBKR config: host={host}, port={port}, client_id_base={client_id_base}")
             
+            # Load reconnect config from user config
+            from ..integrations.ibkr_client_threadsafe import ReconnectConfig
+            reconnect_settings = ibkr_config.get('reconnect', {})
+            reconnect_config = ReconnectConfig(
+                enabled=reconnect_settings.get('enabled', True),
+                initial_delay=reconnect_settings.get('initial_delay', 30.0),
+                max_delay=reconnect_settings.get('max_delay', 300.0),
+                backoff_factor=reconnect_settings.get('backoff_factor', 1.5),
+                max_attempts=reconnect_settings.get('max_attempts', 0),  # 0 = unlimited
+                health_check_interval=reconnect_settings.get('health_check_interval', 30.0),
+                gateway_restart_delay=reconnect_settings.get('gateway_restart_delay', 120.0),
+            )
+
+            self.logger.info(
+                f"IBKR reconnect config: initial_delay={reconnect_config.initial_delay}s, "
+                f"gateway_restart_delay={reconnect_config.gateway_restart_delay}s"
+            )
+
             # Try connecting with incrementing client IDs to avoid conflicts
             for attempt in range(max_retries):
                 client_id = client_id_base + attempt
                 try:
                     self.logger.info(f"Connecting to IBKR at {host}:{port} (client_id={client_id})")
-                    
+
                     # ThreadSafeIBKRClient runs IB in its own thread with event loop
                     self.ibkr_client = ThreadSafeIBKRClient(
                         host=host,
                         port=port,
                         client_id=client_id,
+                        reconnect_config=reconnect_config,
                     )
                     
                     if self.ibkr_client.connect():
@@ -298,7 +321,46 @@ class ServiceController:
             
         except Exception as e:
             self.logger.error(f"Failed to initialize Discord: {e}")
-    
+
+    def _init_polygon(self):
+        """Initialize Polygon/Massive API client for market data."""
+        # Support both new (market_data) and legacy (polygon) config sections
+        market_data_config = self.config.get('market_data', {})
+        polygon_config = self.config.get('polygon', {})
+
+        # Prefer market_data, fall back to polygon
+        api_key = market_data_config.get('api_key') or polygon_config.get('api_key', '')
+        base_url = (
+            market_data_config.get('base_url') or
+            polygon_config.get('base_url', 'https://api.polygon.io')
+        )
+        # Use faster rate limit for paid tiers (Stocks Starter has unlimited)
+        rate_limit_delay = market_data_config.get('rate_limit_delay', 0.1)
+
+        if not api_key:
+            self.logger.warning("No Polygon/Massive API key configured - volume updates disabled")
+            return
+
+        try:
+            from ..integrations.polygon_client import PolygonClient
+
+            self.polygon_client = PolygonClient(
+                api_key=api_key,
+                base_url=base_url,
+                rate_limit_delay=rate_limit_delay,
+                logger=self.logger.getChild('polygon')
+            )
+
+            # Determine provider for logging
+            provider = 'polygon'
+            if 'massive' in base_url.lower():
+                provider = 'massive'
+
+            self.logger.info(f"{provider.upper()} API client initialized (rate_limit={rate_limit_delay}s)")
+
+        except Exception as e:
+            self.logger.error(f"Failed to initialize Polygon client: {e}")
+
     def _init_scoring_engine(self):
         """Initialize the scoring engine for setup evaluation."""
         try:
@@ -370,6 +432,16 @@ class ServiceController:
         thread_config = self.config.get('threads', {})
         breakout_config = self.config.get('breakout', {})
         
+        # Create volume service for breakout thread (for intraday volume fallback)
+        volume_service = None
+        if self.polygon_client and self.db_session_factory:
+            from ..services.volume_service import VolumeService
+            volume_service = VolumeService(
+                db_session_factory=self.db_session_factory,
+                polygon_client=self.polygon_client,
+                logger=get_logger('volume')
+            )
+
         # Phase 2: Pass scoring engine, position sizer, and alert service to breakout thread
         self.threads['breakout'] = BreakoutThread(
             shutdown_event=self.shutdown_event,
@@ -382,6 +454,8 @@ class ServiceController:
             scoring_engine=self.scoring_engine,
             position_sizer=self.position_sizer,
             alert_service=self.alert_service,
+            # Volume service for intraday fallback
+            volume_service=volume_service,
             logger=get_logger('breakout')  # Use configured logger
         )
         
@@ -408,7 +482,20 @@ class ServiceController:
             config=self.config,
             logger=get_logger('regime')  # Use configured logger
         )
-        
+
+        # Maintenance thread for nightly updates (volume, earnings, cleanup)
+        if self.polygon_client:
+            self.threads['maintenance'] = MaintenanceThread(
+                shutdown_event=self.shutdown_event,
+                poll_interval=thread_config.get('maintenance_interval', 300),  # Check every 5 min
+                db_session_factory=self.db_session_factory,
+                polygon_client=self.polygon_client,
+                config=self.config,
+                logger=get_logger('maintenance')
+            )
+        else:
+            self.logger.warning("Maintenance thread disabled - no Polygon client")
+
         self.logger.info(f"Created {len(self.threads)} threads")
     
     def _start_ipc_server(self):
