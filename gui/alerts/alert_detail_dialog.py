@@ -104,11 +104,12 @@ class AlertDetailDialog(QDialog):
                     if self.alert.get('ma21') is None:
                         self.alert['ma21'] = position.ma_21
                     
-                    # Calculate P&L if we have entry price
-                    if self.alert.get('pnl_pct_at_alert') is None and position.entry_price:
+                    # Calculate P&L if we have entry price (use e1_price or avg_cost)
+                    entry_price = position.e1_price or position.avg_cost
+                    if self.alert.get('pnl_pct_at_alert') is None and entry_price:
                         alert_price = self.alert.get('price')
                         if alert_price:
-                            pnl = ((alert_price - position.entry_price) / position.entry_price) * 100
+                            pnl = ((alert_price - entry_price) / entry_price) * 100
                             self.alert['pnl_pct_at_alert'] = pnl
                     
             finally:

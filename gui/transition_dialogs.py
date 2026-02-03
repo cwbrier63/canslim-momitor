@@ -803,26 +803,36 @@ class AddPositionDialog(QDialog):
         self.industry_rs_rank_input.setPlaceholderText("e.g., 10 of 38")
         self.industry_rs_rank_input.setToolTip("RS Rank within Industry Group")
         right_layout.addRow("RS in Industry:", self.industry_rs_rank_input)
-        
+
         self.fund_count_input = QSpinBox()
         self.fund_count_input.setRange(0, 10000)
         self.fund_count_input.setToolTip("Number of Funds (from Owners panel)")
+        self.fund_count_input.valueChanged.connect(self._update_funds_qtr_chg)
         right_layout.addRow("Fund Count:", self.fund_count_input)
-        
+
+        self.prior_fund_count_input = QSpinBox()
+        self.prior_fund_count_input.setRange(0, 10000)
+        self.prior_fund_count_input.setToolTip("Prior quarter fund count (for calculating change)")
+        self.prior_fund_count_input.valueChanged.connect(self._update_funds_qtr_chg)
+        right_layout.addRow("Prior Fund Count:", self.prior_fund_count_input)
+
         self.funds_qtr_chg_input = QSpinBox()
         self.funds_qtr_chg_input.setRange(-9999, 9999)
-        self.funds_qtr_chg_input.setToolTip("Change in fund count vs prior quarter")
+        self.funds_qtr_chg_input.setToolTip("Auto-calculated: Fund Count - Prior Fund Count")
+        self.funds_qtr_chg_input.setReadOnly(True)
+        self.funds_qtr_chg_input.setEnabled(False)
+        self.funds_qtr_chg_input.setStyleSheet("QSpinBox { background-color: #3C3C3C; color: #888888; }")
         right_layout.addRow("Funds Qtr Chg:", self.funds_qtr_chg_input)
-        
+
         self.prior_uptrend_input = QSpinBox()
         self.prior_uptrend_input.setRange(-100, 500)
         self.prior_uptrend_input.setSuffix("%")
         right_layout.addRow("Prior Uptrend:", self.prior_uptrend_input)
-        
+
         ratings_layout.addLayout(right_layout)
         ratings_group.setLayout(ratings_layout)
         layout.addWidget(ratings_group)
-        
+
         # Breakout Quality
         breakout_group = QGroupBox("Breakout Quality")
         breakout_layout = QFormLayout()
@@ -1053,6 +1063,9 @@ class AddPositionDialog(QDialog):
         # Institutional
         if self.fund_count_input.value() > 0:
             self.result_data['fund_count'] = self.fund_count_input.value()
+        if self.prior_fund_count_input.value() > 0:
+            self.result_data['prior_fund_count'] = self.prior_fund_count_input.value()
+        # funds_qtr_chg is auto-calculated from fund_count - prior_fund_count
         if self.funds_qtr_chg_input.value() != 0:
             self.result_data['funds_qtr_chg'] = self.funds_qtr_chg_input.value()
         if self.prior_uptrend_input.value() > 0:
@@ -1082,9 +1095,18 @@ class AddPositionDialog(QDialog):
         # Notes
         if self.notes_input.toPlainText():
             self.result_data['notes'] = self.notes_input.toPlainText()
-        
+
         self.accept()
-    
+
+    def _update_funds_qtr_chg(self):
+        """Auto-calculate funds_qtr_chg from fund_count - prior_fund_count."""
+        fund_count = self.fund_count_input.value()
+        prior_fund_count = self.prior_fund_count_input.value()
+        if fund_count > 0 and prior_fund_count > 0:
+            self.funds_qtr_chg_input.setValue(fund_count - prior_fund_count)
+        else:
+            self.funds_qtr_chg_input.setValue(0)
+
     def get_result(self) -> Dict[str, Any]:
         """Get the collected data."""
         return self.result_data
@@ -1364,26 +1386,36 @@ class EditPositionDialog(QDialog):
         self.industry_rs_rank_input.setPlaceholderText("e.g., 10 of 38")
         self.industry_rs_rank_input.setToolTip("RS Rank within Industry Group")
         right_layout.addRow("RS in Industry:", self.industry_rs_rank_input)
-        
+
         self.fund_count_input = QSpinBox()
         self.fund_count_input.setRange(0, 10000)
         self.fund_count_input.setToolTip("Number of Funds (from Owners panel)")
+        self.fund_count_input.valueChanged.connect(self._update_funds_qtr_chg)
         right_layout.addRow("Fund Count:", self.fund_count_input)
-        
+
+        self.prior_fund_count_input = QSpinBox()
+        self.prior_fund_count_input.setRange(0, 10000)
+        self.prior_fund_count_input.setToolTip("Prior quarter fund count (for calculating change)")
+        self.prior_fund_count_input.valueChanged.connect(self._update_funds_qtr_chg)
+        right_layout.addRow("Prior Fund Count:", self.prior_fund_count_input)
+
         self.funds_qtr_chg_input = QSpinBox()
         self.funds_qtr_chg_input.setRange(-9999, 9999)
-        self.funds_qtr_chg_input.setToolTip("Change in fund count vs prior quarter")
+        self.funds_qtr_chg_input.setToolTip("Auto-calculated: Fund Count - Prior Fund Count")
+        self.funds_qtr_chg_input.setReadOnly(True)
+        self.funds_qtr_chg_input.setEnabled(False)
+        self.funds_qtr_chg_input.setStyleSheet("QSpinBox { background-color: #E0E0E0; color: #666666; }")
         right_layout.addRow("Funds Qtr Chg:", self.funds_qtr_chg_input)
-        
+
         self.prior_uptrend_input = QSpinBox()
         self.prior_uptrend_input.setRange(-100, 500)
         self.prior_uptrend_input.setSuffix("%")
         right_layout.addRow("Prior Uptrend:", self.prior_uptrend_input)
-        
+
         ratings_layout.addLayout(right_layout)
         ratings_group.setLayout(ratings_layout)
         layout.addWidget(ratings_group)
-        
+
         # Breakout Quality (NEW)
         breakout_group = QGroupBox("Breakout Quality (Pattern Rec Panel)")
         breakout_layout = QFormLayout()
@@ -1659,7 +1691,8 @@ class EditPositionDialog(QDialog):
             self.industry_rs_rank_input.setText(str(data['industry_rs_rank']))
         
         self.fund_count_input.setValue(int(data.get('fund_count') or 0))
-        self.funds_qtr_chg_input.setValue(int(data.get('funds_qtr_chg') or 0))
+        self.prior_fund_count_input.setValue(int(data.get('prior_fund_count') or 0))
+        # funds_qtr_chg will be auto-calculated when fund_count or prior_fund_count is set
         self.prior_uptrend_input.setValue(int(data.get('prior_uptrend') or 0))
         
         # Breakout quality
@@ -1837,7 +1870,8 @@ class EditPositionDialog(QDialog):
             'industry_rs_rank': self.industry_rs_rank_input.text().strip() or None,
             # Institutional
             'fund_count': get_value(self.fund_count_input),
-            'funds_qtr_chg': get_value_allow_zero(self.funds_qtr_chg_input),  # Can be negative
+            'prior_fund_count': get_value(self.prior_fund_count_input),
+            'funds_qtr_chg': get_value_allow_zero(self.funds_qtr_chg_input),  # Auto-calculated
             'prior_uptrend': get_value(self.prior_uptrend_input),
             # Breakout quality
             'breakout_vol_pct': get_value(self.breakout_vol_pct_input),
@@ -1880,7 +1914,16 @@ class EditPositionDialog(QDialog):
                 self.result_data[field] = date(qdate.year(), qdate.month(), qdate.day())
 
         self.accept()
-    
+
+    def _update_funds_qtr_chg(self):
+        """Auto-calculate funds_qtr_chg from fund_count - prior_fund_count."""
+        fund_count = self.fund_count_input.value()
+        prior_fund_count = self.prior_fund_count_input.value()
+        if fund_count > 0 and prior_fund_count > 0:
+            self.funds_qtr_chg_input.setValue(fund_count - prior_fund_count)
+        else:
+            self.funds_qtr_chg_input.setValue(0)
+
     def get_result(self) -> Dict[str, Any]:
         """Get the updated data."""
         return self.result_data

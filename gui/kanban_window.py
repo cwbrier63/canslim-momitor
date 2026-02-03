@@ -2051,6 +2051,7 @@ class KanbanMainWindow(QMainWindow):
                 'industry_rs_rank': position.industry_rs_rank,
                 # Institutional
                 'fund_count': position.fund_count,
+                'prior_fund_count': position.prior_fund_count,
                 'funds_qtr_chg': position.funds_qtr_chg,
                 'prior_uptrend': position.prior_uptrend,
                 # Breakout quality
@@ -2176,6 +2177,10 @@ class KanbanMainWindow(QMainWindow):
             # Check alerts action (real-time status check)
             check_alerts_action = menu.addAction("🔍 Check Alerts")
             check_alerts_action.triggered.connect(lambda: self._check_position_alerts(position_id))
+
+            # View history action
+            history_action = menu.addAction("📜 View History")
+            history_action.triggered.connect(lambda: self._show_position_history(position_id))
 
             menu.addSeparator()
             
@@ -2374,6 +2379,121 @@ class KanbanMainWindow(QMainWindow):
         except Exception as e:
             self.logger.error(f"Error showing position alerts: {e}")
             QMessageBox.warning(self, "Error", f"Failed to load alerts: {e}")
+
+    def _show_position_history(self, position_id: int):
+        """Show the change history for a position in spreadsheet comparison view."""
+        try:
+            from canslim_monitor.gui.position_history_dialog import PositionHistoryDialog
+            from canslim_monitor.data.repositories import HistoryRepository
+
+            session = self.db.get_new_session()
+            try:
+                repos = RepositoryManager(session)
+                position = repos.positions.get_by_id(position_id)
+
+                if not position:
+                    QMessageBox.warning(self, "Error", "Position not found")
+                    return
+
+                # Get history using the history repository
+                history_repo = HistoryRepository(session)
+                history_records = history_repo.get_position_history(position_id, limit=200)
+
+                # Convert to list of dicts for the dialog
+                history = []
+                for record in history_records:
+                    history.append({
+                        'field_name': record.field_name,
+                        'old_value': record.old_value,
+                        'new_value': record.new_value,
+                        'changed_at': record.changed_at,
+                        'change_source': record.change_source,
+                    })
+
+                # Build current position dict with all tracked fields
+                current_position = {
+                    'symbol': position.symbol,
+                    'portfolio': position.portfolio,
+                    'pattern': position.pattern,
+                    'pivot': position.pivot,
+                    'stop_price': position.stop_price,
+                    'hard_stop_pct': position.hard_stop_pct,
+                    'tp1_pct': position.tp1_pct,
+                    'tp2_pct': position.tp2_pct,
+                    'state': position.state,
+                    'watch_date': position.watch_date,
+                    'entry_date': position.entry_date,
+                    'breakout_date': position.breakout_date,
+                    'earnings_date': position.earnings_date,
+                    'e1_shares': position.e1_shares,
+                    'e1_price': position.e1_price,
+                    'e1_date': getattr(position, 'e1_date', None),
+                    'e2_shares': position.e2_shares,
+                    'e2_price': position.e2_price,
+                    'e2_date': getattr(position, 'e2_date', None),
+                    'e3_shares': position.e3_shares,
+                    'e3_price': position.e3_price,
+                    'e3_date': getattr(position, 'e3_date', None),
+                    'tp1_sold': position.tp1_sold,
+                    'tp1_price': position.tp1_price,
+                    'tp1_date': getattr(position, 'tp1_date', None),
+                    'tp2_sold': position.tp2_sold,
+                    'tp2_price': position.tp2_price,
+                    'tp2_date': getattr(position, 'tp2_date', None),
+                    'total_shares': position.total_shares,
+                    'avg_cost': position.avg_cost,
+                    'rs_rating': position.rs_rating,
+                    'rs_3mo': position.rs_3mo,
+                    'rs_6mo': position.rs_6mo,
+                    'eps_rating': position.eps_rating,
+                    'comp_rating': position.comp_rating,
+                    'smr_rating': position.smr_rating,
+                    'ad_rating': position.ad_rating,
+                    'ud_vol_ratio': position.ud_vol_ratio,
+                    'industry_rank': position.industry_rank,
+                    'fund_count': position.fund_count,
+                    'prior_fund_count': position.prior_fund_count,
+                    'funds_qtr_chg': position.funds_qtr_chg,
+                    'base_stage': position.base_stage,
+                    'base_depth': position.base_depth,
+                    'base_length': position.base_length,
+                    'prior_uptrend': position.prior_uptrend,
+                    'breakout_vol_pct': position.breakout_vol_pct,
+                    'breakout_price_pct': position.breakout_price_pct,
+                    'close_price': position.close_price,
+                    'close_date': position.close_date,
+                    'close_reason': position.close_reason,
+                    'realized_pnl': position.realized_pnl,
+                    'realized_pnl_pct': position.realized_pnl_pct,
+                    'entry_grade': position.entry_grade,
+                    'entry_score': position.entry_score,
+                    'tp1_target': position.tp1_target,
+                    'tp2_target': position.tp2_target,
+                    'original_pivot': getattr(position, 'original_pivot', None),
+                    'ma_test_count': getattr(position, 'ma_test_count', None),
+                    'py1_done': getattr(position, 'py1_done', None),
+                    'py2_done': getattr(position, 'py2_done', None),
+                    'notes': position.notes,
+                }
+
+                # Show dialog
+                dialog = PositionHistoryDialog(
+                    symbol=position.symbol,
+                    position_id=position_id,
+                    current_position=current_position,
+                    history=history,
+                    parent=self
+                )
+                dialog.exec()
+
+                self.logger.info(f"Opened history dialog for {position.symbol} with {len(history)} records")
+
+            finally:
+                session.close()
+
+        except Exception as e:
+            self.logger.error(f"Error showing position history: {e}")
+            QMessageBox.warning(self, "Error", f"Failed to load history: {e}")
 
     def _check_position_alerts(self, position_id: int):
         """

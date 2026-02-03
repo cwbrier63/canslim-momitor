@@ -93,7 +93,8 @@ class Position(Base):
     ud_vol_ratio = Column(Float)
     group_rank = Column(Integer)                # DEPRECATED: Use industry_rank instead
     fund_count = Column(Integer)
-    
+    prior_fund_count = Column(Integer)          # Prior quarter fund count (for calculating funds_qtr_chg)
+
     # Industry & Sector Data (MarketSurge - Industry Panel)
     industry_rank = Column(Integer)             # NEW: 1-197 ranking (replaces group_rank)
     industry_stock_count = Column(Integer)      # NEW: Stocks in industry group
@@ -162,7 +163,9 @@ class Position(Base):
     alerts = relationship("Alert", back_populates="position", cascade="all, delete-orphan")
     snapshots = relationship("DailySnapshot", back_populates="position", cascade="all, delete-orphan")
     outcome = relationship("Outcome", back_populates="position", uselist=False)
-    
+    history = relationship("PositionHistory", back_populates="position", cascade="all, delete-orphan",
+                          order_by="desc(PositionHistory.changed_at)")
+
     __table_args__ = (
         UniqueConstraint('symbol', 'portfolio', name='uq_symbol_portfolio'),
         Index('idx_positions_portfolio', 'portfolio'),
@@ -183,6 +186,76 @@ class Position(Base):
     @property
     def is_closed(self) -> bool:
         return self.state < 0
+
+
+# Fields to track for position history (all editable fields)
+TRACKED_FIELDS = {
+    # Setup & Identity
+    'symbol', 'portfolio', 'pattern', 'pivot', 'stop_price',
+    'hard_stop_pct', 'tp1_pct', 'tp2_pct',
+    # State & Lifecycle
+    'state', 'watch_date', 'entry_date', 'breakout_date', 'earnings_date',
+    # Position Management
+    'e1_shares', 'e1_price', 'e1_date',
+    'e2_shares', 'e2_price', 'e2_date',
+    'e3_shares', 'e3_price', 'e3_date',
+    'tp1_sold', 'tp1_price', 'tp1_date',
+    'tp2_sold', 'tp2_price', 'tp2_date',
+    'total_shares', 'avg_cost',
+    # CANSLIM Ratings
+    'rs_rating', 'rs_3mo', 'rs_6mo', 'eps_rating', 'comp_rating',
+    'smr_rating', 'ad_rating', 'ud_vol_ratio',
+    'industry_rank', 'fund_count', 'prior_fund_count', 'funds_qtr_chg',
+    # Base Characteristics
+    'base_stage', 'base_depth', 'base_length', 'prior_uptrend',
+    'breakout_vol_pct', 'breakout_price_pct',
+    # Exit Info
+    'close_price', 'close_date', 'close_reason',
+    'realized_pnl', 'realized_pnl_pct',
+    # State -1.5 fields
+    'original_pivot', 'ma_test_count',
+    # Scoring & Notes
+    'entry_grade', 'entry_score', 'notes',
+    # Pyramid flags
+    'py1_done', 'py2_done',
+    # Targets (when manually set)
+    'tp1_target', 'tp2_target',
+}
+
+
+class PositionHistory(Base):
+    """
+    Tracks changes to position fields over time.
+    Stores the old and new values with timestamp and source.
+    """
+    __tablename__ = 'position_history'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    position_id = Column(Integer, ForeignKey('positions.id', ondelete='CASCADE'), nullable=False)
+
+    # When the change happened
+    changed_at = Column(DateTime, default=func.now(), nullable=False, index=True)
+
+    # What triggered the change
+    change_source = Column(String(30))  # 'manual_edit', 'state_transition', 'system_calc', 'price_update'
+
+    # The field that changed
+    field_name = Column(String(50), nullable=False, index=True)
+
+    # Values (stored as strings for flexibility)
+    old_value = Column(String(500))
+    new_value = Column(String(500))
+
+    # Relationship
+    position = relationship("Position", back_populates="history")
+
+    __table_args__ = (
+        Index('idx_position_history_lookup', 'position_id', 'field_name'),
+        Index('idx_position_history_recent', 'position_id', 'changed_at'),
+    )
+
+    def __repr__(self):
+        return f"<PositionHistory(position_id={self.position_id}, field='{self.field_name}', changed_at='{self.changed_at}')>"
 
 
 class Alert(Base):

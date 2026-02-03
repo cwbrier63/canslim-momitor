@@ -219,22 +219,21 @@ class BreakoutCheckerTool:
         self.alt_entry_checker._cooldowns.clear()
 
         # Build PositionContext for the checker
+        # For watching positions, use e1_price or avg_cost (may be None)
+        entry_price = position.e1_price or position.avg_cost or 0
         context = PositionContext(
             symbol=position.symbol,
+            position_id=position.id,
             state=position.state or 0,
             current_price=current_price,
-            entry_price=position.entry_price or 0,
-            avg_cost=position.avg_cost or position.entry_price or 0,
+            entry_price=entry_price,
             pivot_price=position.pivot or 0,
-            stop_price=position.stop_price or 0,
             pnl_pct=0,  # Watchlist doesn't have P&L
-            shares=0,
+            shares=position.total_shares or 0,
             volume_ratio=volume_ratio,
             ma_21=technical_data.get('ma_21') or technical_data.get('ema_21'),
             ma_50=technical_data.get('ma_50'),
             ma_200=technical_data.get('ma_200'),
-            days_held=0,
-            market_regime="",
         )
 
         # Run the checker

@@ -749,12 +749,40 @@ class BreakoutThread(BaseThread):
             color = 0x808080  # Gray
             title = f"📢 ALERT: {symbol}"
         
-        # Build compact 3-line description
+        # Get MA values for technical context
+        ma_21 = price_data.get('ma21', 0)
+        ma_50 = price_data.get('ma50', 0)
+
+        # Calculate MA distances
+        ema_21_dist = ((current_price - ma_21) / ma_21 * 100) if ma_21 and ma_21 > 0 else None
+        ma_50_dist = ((current_price - ma_50) / ma_50 * 100) if ma_50 and ma_50 > 0 else None
+
+        # Format MA distance string
+        def format_ma_dist(dist):
+            if dist is None:
+                return "N/A"
+            return f"{dist:+.1f}%"
+
+        # Determine trend based on price vs MAs
+        if ma_21 and ma_50 and ma_21 > 0 and ma_50 > 0:
+            above_21 = current_price > ma_21
+            above_50 = current_price > ma_50
+            if above_21 and above_50:
+                trend_str = "↗ Uptrend"
+            elif not above_21 and not above_50:
+                trend_str = "↘ Downtrend"
+            else:
+                trend_str = "→ Sideways"
+        else:
+            trend_str = "→ Unknown"
+
+        # Build compact 4-line description
         line1 = f"{grade} ({score}) | RS {rs_rating} | {pattern} {stage_display}"
         line2 = f"${current_price:.2f} ({distance_pct:+.1f}%) | Pivot ${pivot:.2f}"
         line3 = f"Zone: ${pivot:.2f} - ${buy_zone_top:.2f} | Vol {vol_str}"
-        
-        description = f"{line1}\n{line2}\n{line3}"
+        line4 = f"21 EMA: {format_ma_dist(ema_21_dist)} | 50 MA: {format_ma_dist(ma_50_dist)}"
+
+        description = f"{line1}\n{line2}\n{line3}\n{line4}\nTrend: {trend_str}"
         
         # Build footer with market regime and warnings
         footer_parts = []
@@ -767,12 +795,14 @@ class BreakoutThread(BaseThread):
         else:
             footer_parts.append(f"➖ {regime_upper.title()}")
         
-        # Stale pivot warning
-        if pivot_analysis and pivot_analysis.status not in ('FRESH', 'RECENT'):
-            if pivot_analysis.days_since_set and pivot_analysis.days_since_set > 90:
-                footer_parts.append(f"⚠️ Stale ({pivot_analysis.days_since_set}d)")
-            elif pivot_analysis.status == 'STALE':
-                footer_parts.append("⚠️ Stale pivot")
+        # Stale pivot warning - only show if we actually know the pivot age
+        # (days_since_set=999 means unknown/no pivot_set_date)
+        if pivot_analysis and pivot_analysis.status not in ('FRESH', 'RECENT', 'UNKNOWN'):
+            if pivot_analysis.days_since_set and pivot_analysis.days_since_set < 999:
+                if pivot_analysis.days_since_set > 90:
+                    footer_parts.append(f"⚠️ Stale ({pivot_analysis.days_since_set}d)")
+                elif pivot_analysis.status == 'STALE':
+                    footer_parts.append("⚠️ Stale pivot")
         
         footer_text = " • ".join(footer_parts)
         
@@ -1158,31 +1188,35 @@ class BreakoutThread(BaseThread):
     def _update_market_regime(self):
         """Update cached market regime from database."""
         # Cache for 5 minutes
-        if (self._market_regime_cache_time and 
+        if (self._market_regime_cache_time and
             (datetime.now() - self._market_regime_cache_time).total_seconds() < 300):
             return
-        
+
         if not self.db_session_factory:
             return
-        
+
         try:
             session = self.db_session_factory()
             try:
-                # Get most recent market regime
-                regime = (
-                    session.query(MarketRegime)
-                    .order_by(MarketRegime.regime_date.desc())
+                # Use MarketRegimeAlert (same as position_thread) for consistency
+                from canslim_monitor.regime.models_regime import MarketRegimeAlert
+                from sqlalchemy import desc
+
+                # Get most recent regime alert
+                latest = (
+                    session.query(MarketRegimeAlert)
+                    .order_by(desc(MarketRegimeAlert.date))
                     .first()
                 )
-                
-                if regime:
-                    self._market_regime_cache = regime.regime
+
+                if latest and latest.regime:
+                    self._market_regime_cache = latest.regime.value
                     self._market_regime_cache_time = datetime.now()
-                    self.logger.debug(f"Market regime updated: {regime.regime}")
-                    
+                    self.logger.debug(f"Market regime updated: {latest.regime.value}")
+
             finally:
                 session.close()
-                
+
         except Exception as e:
             self.logger.warning(f"Could not fetch market regime: {e}")
     

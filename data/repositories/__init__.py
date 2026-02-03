@@ -13,6 +13,7 @@ from canslim_monitor.data.repositories.market_config_repo import (
     ConfigRepository,
     LearnedWeightsRepository
 )
+from canslim_monitor.data.repositories.history_repo import HistoryRepository
 
 __all__ = [
     'PositionRepository',
@@ -22,6 +23,7 @@ __all__ = [
     'MarketRegimeRepository',
     'ConfigRepository',
     'LearnedWeightsRepository',
+    'HistoryRepository',
 ]
 
 
@@ -89,3 +91,10 @@ class RepositoryManager:
         if 'learned_weights' not in self._repos:
             self._repos['learned_weights'] = LearnedWeightsRepository(self._session)
         return self._repos['learned_weights']
+
+    @property
+    def history(self) -> HistoryRepository:
+        """Get PositionHistory repository."""
+        if 'history' not in self._repos:
+            self._repos['history'] = HistoryRepository(self._session)
+        return self._repos['history']

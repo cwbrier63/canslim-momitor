@@ -11,7 +11,7 @@ from typing import List, Optional, Dict, Any
 from sqlalchemy import and_, or_, func
 from sqlalchemy.orm import Session
 
-from canslim_monitor.data.models import Position
+from canslim_monitor.data.models import Position, TRACKED_FIELDS, PositionHistory
 
 logger = logging.getLogger('canslim.database')
 
@@ -27,13 +27,17 @@ class PositionRepository:
     def create(self, **kwargs) -> Position:
         """
         Create a new position.
-        
+
         Args:
             **kwargs: Position attributes
-        
+
         Returns:
             Created Position instance
         """
+        # Auto-set pivot_set_date when creating with a pivot
+        if kwargs.get('pivot') and not kwargs.get('pivot_set_date'):
+            kwargs['pivot_set_date'] = date.today()
+
         position = Position(**kwargs)
         self.session.add(position)
         self.session.flush()
@@ -227,12 +231,96 @@ class PositionRepository:
     ENTRY_FIELDS = {'e1_shares', 'e1_price', 'e2_shares', 'e2_price',
                     'e3_shares', 'e3_price', 'tp1_sold', 'tp2_sold'}
 
-    def update(self, position: Position, **kwargs) -> Position:
+    def _record_position_changes(
+        self,
+        position: Position,
+        old_values: Dict[str, Any],
+        new_values: Dict[str, Any],
+        change_source: str = 'manual_edit'
+    ) -> int:
         """
-        Update position attributes.
+        Record changes to position fields in history table.
+
+        Args:
+            position: Position that was updated
+            old_values: Dict of field names to old values
+            new_values: Dict of field names to new values
+            change_source: What triggered the changes
+
+        Returns:
+            Number of changes recorded
+        """
+        from datetime import datetime as dt
+
+        count = 0
+        changed_at = dt.now()
+
+        for field_name in TRACKED_FIELDS:
+            if field_name not in new_values:
+                continue
+
+            old_val = old_values.get(field_name)
+            new_val = new_values.get(field_name)
+
+            # Skip if values are the same
+            if self._values_are_equal(old_val, new_val):
+                continue
+
+            # Convert to strings for storage
+            old_str = self._value_to_string(old_val)
+            new_str = self._value_to_string(new_val)
+
+            history = PositionHistory(
+                position_id=position.id,
+                field_name=field_name,
+                old_value=old_str,
+                new_value=new_str,
+                change_source=change_source,
+                changed_at=changed_at
+            )
+            self.session.add(history)
+            count += 1
+            logger.debug(f"  History: {field_name} = {old_str} -> {new_str}")
+
+        if count > 0:
+            logger.info(f"Recorded {count} field changes for {position.symbol}")
+
+        return count
+
+    def _value_to_string(self, value: Any) -> Optional[str]:
+        """Convert a value to string for storage."""
+        if value is None:
+            return None
+        if isinstance(value, bool):
+            return 'true' if value else 'false'
+        if hasattr(value, 'isoformat'):  # datetime/date
+            return value.isoformat()
+        if isinstance(value, float):
+            return f"{value:.6f}".rstrip('0').rstrip('.')
+        return str(value)
+
+    def _values_are_equal(self, old_val: Any, new_val: Any) -> bool:
+        """Check if two values are equal (handles None and float precision)."""
+        if old_val is None and new_val is None:
+            return True
+        if old_val is None or new_val is None:
+            return False
+        if isinstance(old_val, float) and isinstance(new_val, float):
+            return abs(old_val - new_val) < 0.0001
+        return str(old_val) == str(new_val)
+
+    def update(
+        self,
+        position: Position,
+        change_source: str = 'manual_edit',
+        **kwargs
+    ) -> Position:
+        """
+        Update position attributes and record changes to history.
 
         Args:
             position: Position instance to update
+            change_source: What triggered the update ('manual_edit', 'system_calc', etc.)
             **kwargs: Attributes to update
 
         Returns:
@@ -246,7 +334,21 @@ class PositionRepository:
         user_provided_tp1_target = 'tp1_target' in kwargs and kwargs['tp1_target'] is not None
         user_provided_tp2_target = 'tp2_target' in kwargs and kwargs['tp2_target'] is not None
 
+        # Auto-update pivot_set_date when pivot changes
+        if 'pivot' in kwargs and kwargs['pivot'] is not None:
+            old_pivot = position.pivot
+            new_pivot = kwargs['pivot']
+            if old_pivot != new_pivot:
+                kwargs['pivot_set_date'] = date.today()
+                logger.info(f"  pivot_set_date auto-set to {date.today()} (pivot changed from {old_pivot} to {new_pivot})")
+
         logger.info(f"PositionRepo.update: {position.symbol} (id={position.id}) with {len(kwargs)} fields")
+
+        # Capture old values for history tracking
+        old_values = {}
+        for key in kwargs.keys():
+            if hasattr(position, key) and key in TRACKED_FIELDS:
+                old_values[key] = getattr(position, key, None)
 
         # Track key fields for logging
         key_fields = {'stop_price', 'pivot', 'hard_stop_pct', 'pattern', 'base_stage'}
@@ -272,6 +374,10 @@ class PositionRepository:
             # Also recalculate P&L based on new avg_cost
             if position.avg_cost and position.avg_cost > 0 and position.last_price:
                 position.current_pnl_pct = ((position.last_price - position.avg_cost) / position.avg_cost) * 100
+
+        # Record changes to history (only for tracked fields)
+        if old_values:
+            self._record_position_changes(position, old_values, kwargs, change_source)
 
         position.needs_sheet_sync = True
         self.session.flush()
@@ -318,24 +424,38 @@ class PositionRepository:
         **kwargs
     ) -> Position:
         """
-        Transition position to a new state.
-        
+        Transition position to a new state and record to history.
+
         Args:
             position: Position to transition
             new_state: Target state
             **kwargs: Additional attributes to update
-        
+
         Returns:
             Updated Position instance
         """
+        # Capture old values for history
+        old_state = position.state
+        old_values = {'state': old_state}
+        new_values = {'state': new_state}
+
+        for key in kwargs.keys():
+            if hasattr(position, key) and key in TRACKED_FIELDS:
+                old_values[key] = getattr(position, key, None)
+                new_values[key] = kwargs[key]
+
+        # Apply changes
         position.state = new_state
         position.state_updated_at = datetime.now()
         position.needs_sheet_sync = True
-        
+
         for key, value in kwargs.items():
             if hasattr(position, key):
                 setattr(position, key, value)
-        
+
+        # Record state transition and any additional field changes
+        self._record_position_changes(position, old_values, new_values, 'state_transition')
+
         self.session.flush()
         return position
     
