@@ -2,14 +2,16 @@
 CANSLIM Monitor - Maintenance Thread
 ====================================
 Handles scheduled maintenance tasks like nightly volume updates,
-earnings date updates, and database cleanup.
+earnings date updates, database cleanup, and database backups.
 
 Runs after market close to update data for the next trading day.
 """
 
 import logging
+import shutil
 from datetime import datetime, time
-from typing import Dict, Any, Optional
+from pathlib import Path
+from typing import Dict, Any, Optional, List
 
 import pytz
 
@@ -24,6 +26,7 @@ class MaintenanceThread(BaseThread):
     - Update 50-day volume averages for all active positions
     - Update earnings dates
     - Clean up old historical data
+    - Backup database
 
     Runs after market close (default: 5:00 PM ET) once per day.
     """
@@ -31,6 +34,13 @@ class MaintenanceThread(BaseThread):
     # Default run time: 5:00 PM ET (after market close)
     DEFAULT_RUN_HOUR = 17
     DEFAULT_RUN_MINUTE = 0
+
+    # Default cleanup settings
+    DEFAULT_BARS_DAYS_TO_KEEP = 200  # Keep more for backtesting/ML work
+
+    # Default backup settings
+    DEFAULT_BACKUP_COUNT = 7  # Keep 7 daily backups
+    DEFAULT_BACKUP_DIR = None  # Same directory as database
 
     def __init__(
         self,
@@ -59,13 +69,27 @@ class MaintenanceThread(BaseThread):
         self.enable_volume_update = maintenance_config.get('enable_volume_update', True)
         self.enable_earnings_update = maintenance_config.get('enable_earnings_update', True)
         self.enable_cleanup = maintenance_config.get('enable_cleanup', True)
+        self.enable_backup = maintenance_config.get('enable_backup', True)
+
+        # Cleanup settings - configurable for backtesting/ML needs
+        self.bars_days_to_keep = maintenance_config.get(
+            'bars_days_to_keep', self.DEFAULT_BARS_DAYS_TO_KEEP
+        )
+
+        # Backup settings
+        self.backup_count = maintenance_config.get('backup_count', self.DEFAULT_BACKUP_COUNT)
+        self.backup_dir = maintenance_config.get('backup_dir', self.DEFAULT_BACKUP_DIR)
+
+        # Get database path from config for backup
+        self.db_path = self.config.get('database', {}).get('path')
 
         # Track last run date to ensure we only run once per day
         self._last_run_date: Optional[datetime.date] = None
 
         self.logger.info(
             f"Maintenance thread initialized. Run time: {self.run_hour}:{self.run_minute:02d} ET, "
-            f"volume_update={self.enable_volume_update}, earnings_update={self.enable_earnings_update}"
+            f"volume_update={self.enable_volume_update}, earnings_update={self.enable_earnings_update}, "
+            f"backup={self.enable_backup}, bars_keep={self.bars_days_to_keep} days"
         )
 
     def _should_run(self) -> bool:
@@ -105,7 +129,16 @@ class MaintenanceThread(BaseThread):
             'volume_update': None,
             'earnings_update': None,
             'cleanup': None,
+            'backup': None,
         }
+
+        # Backup database first (before any modifications)
+        if self.enable_backup:
+            try:
+                results['backup'] = self._backup_database()
+            except Exception as e:
+                self.logger.error(f"Database backup failed: {e}", exc_info=True)
+                results['backup'] = {'error': str(e)}
 
         # Update volume data
         if self.enable_volume_update:
@@ -251,7 +284,9 @@ class MaintenanceThread(BaseThread):
 
         from ...services.volume_service import VolumeService
 
-        self.logger.info("Cleaning up old historical data...")
+        self.logger.info(
+            f"Cleaning up old historical data (keeping {self.bars_days_to_keep} days)..."
+        )
 
         # Create a temporary volume service just for cleanup
         volume_service = VolumeService(
@@ -260,8 +295,103 @@ class MaintenanceThread(BaseThread):
             logger=self.logger
         )
 
-        # Keep 100 days of bars (50 for average + buffer)
-        deleted_bars = volume_service.cleanup_old_bars(days_to_keep=100)
+        # Use configurable retention period
+        deleted_bars = volume_service.cleanup_old_bars(days_to_keep=self.bars_days_to_keep)
 
         self.logger.info(f"Cleanup complete: {deleted_bars} old bars deleted")
-        return {'deleted_bars': deleted_bars}
+        return {'deleted_bars': deleted_bars, 'days_kept': self.bars_days_to_keep}
+
+    def _backup_database(self) -> Dict[str, Any]:
+        """
+        Create a backup of the database file.
+
+        Maintains a rotating set of backups based on backup_count setting.
+        """
+        if not self.db_path:
+            self.logger.warning("Database backup skipped - no database path configured")
+            return {'skipped': 'no database path'}
+
+        db_file = Path(self.db_path)
+        if not db_file.exists():
+            self.logger.warning(f"Database backup skipped - file not found: {db_file}")
+            return {'skipped': 'database file not found'}
+
+        # Determine backup directory
+        if self.backup_dir:
+            backup_dir = Path(self.backup_dir)
+        else:
+            backup_dir = db_file.parent / 'backups'
+
+        # Create backup directory if it doesn't exist
+        backup_dir.mkdir(parents=True, exist_ok=True)
+
+        # Generate backup filename with timestamp
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        backup_name = f"{db_file.stem}_{timestamp}{db_file.suffix}"
+        backup_path = backup_dir / backup_name
+
+        self.logger.info(f"Creating database backup: {backup_path}")
+
+        try:
+            # Copy database file
+            shutil.copy2(db_file, backup_path)
+            backup_size = backup_path.stat().st_size
+
+            self.logger.info(
+                f"Backup created: {backup_name} ({backup_size / 1024 / 1024:.1f} MB)"
+            )
+
+            # Rotate old backups
+            deleted_backups = self._rotate_backups(backup_dir, db_file.stem, db_file.suffix)
+
+            return {
+                'backup_path': str(backup_path),
+                'backup_size_mb': round(backup_size / 1024 / 1024, 2),
+                'deleted_old_backups': deleted_backups
+            }
+
+        except Exception as e:
+            self.logger.error(f"Database backup failed: {e}")
+            return {'error': str(e)}
+
+    def _rotate_backups(
+        self,
+        backup_dir: Path,
+        db_stem: str,
+        db_suffix: str
+    ) -> int:
+        """
+        Remove old backups beyond the configured backup_count.
+
+        Args:
+            backup_dir: Directory containing backups
+            db_stem: Database filename stem (without extension)
+            db_suffix: Database file extension
+
+        Returns:
+            Number of old backups deleted
+        """
+        # Find all backup files matching the pattern
+        pattern = f"{db_stem}_*{db_suffix}"
+        backup_files = sorted(
+            backup_dir.glob(pattern),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True  # Newest first
+        )
+
+        deleted = 0
+
+        # Keep only the configured number of backups
+        if len(backup_files) > self.backup_count:
+            for old_backup in backup_files[self.backup_count:]:
+                try:
+                    old_backup.unlink()
+                    deleted += 1
+                    self.logger.debug(f"Deleted old backup: {old_backup.name}")
+                except Exception as e:
+                    self.logger.warning(f"Could not delete old backup {old_backup}: {e}")
+
+        if deleted > 0:
+            self.logger.info(f"Rotated {deleted} old backup(s), keeping {self.backup_count}")
+
+        return deleted

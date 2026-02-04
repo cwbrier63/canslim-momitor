@@ -127,6 +127,10 @@ class CombinedDistributionData:
     qqq_expired_today: int = 0
     expiration_details: List[Dict] = None
 
+    # New D-days tracking (for historical seeding stats)
+    spy_new_d_days: int = 0
+    qqq_new_d_days: int = 0
+
     def __post_init__(self):
         if self.expiration_details is None:
             self.expiration_details = []
@@ -148,6 +152,11 @@ class CombinedDistributionData:
     def had_expirations(self) -> bool:
         """True if any D-days expired today."""
         return self.total_expired_today > 0
+
+    @property
+    def total_new_d_days(self) -> int:
+        """Total new D-days created in this update."""
+        return self.spy_new_d_days + self.qqq_new_d_days
 
 
 class DistributionDayTracker:
@@ -394,7 +403,10 @@ class DistributionDayTracker:
         self.db.commit()
 
         # Get current active count and dates
-        active_count, active_dates, raw_count = self._get_active_distribution_days(symbol)
+        # Pass current_date for historical seeding to filter out future D-days
+        active_count, active_dates, raw_count = self._get_active_distribution_days(
+            symbol, as_of_date=current_dt
+        )
 
         if active_count != raw_count:
             logger.info(f"{symbol}: Display count={active_count}, Raw detected={raw_count} (override active)")
@@ -434,10 +446,16 @@ class DistributionDayTracker:
         expired_count = 0
         expiration_details = []
 
-        active_days = self.db.query(DistributionDay).filter(
+        query = self.db.query(DistributionDay).filter(
             DistributionDay.symbol == symbol,
             DistributionDay.expired == False
-        ).all()
+        )
+
+        # For historical seeding, only process D-days up to current simulation date
+        if current_date:
+            query = query.filter(DistributionDay.date <= current_date)
+
+        active_days = query.all()
 
         # Build date->bar lookup for accurate trading day counting
         bar_dates = {bar.date: bar for bar in daily_bars}
@@ -502,20 +520,34 @@ class DistributionDayTracker:
         
         return count
     
-    def _get_active_distribution_days(self, symbol: str) -> Tuple[int, List[date], int]:
+    def _get_active_distribution_days(
+        self,
+        symbol: str,
+        as_of_date: date = None
+    ) -> Tuple[int, List[date], int]:
         """
         Get count and dates of active (non-expired) distribution days.
-        
+
+        Args:
+            symbol: Symbol to query (SPY/QQQ)
+            as_of_date: Only include D-days on or before this date (for historical seeding)
+
         Returns:
             Tuple of (display_count, active_dates, raw_count)
             - display_count: Count after any overrides (for reporting)
             - active_dates: Actual detected D-day dates (for histogram)
             - raw_count: Count before overrides (for debugging)
         """
-        active = self.db.query(DistributionDay).filter(
+        query = self.db.query(DistributionDay).filter(
             DistributionDay.symbol == symbol,
             DistributionDay.expired == False
-        ).order_by(DistributionDay.date.desc()).all()
+        )
+
+        # For historical seeding, only include D-days up to the simulated date
+        if as_of_date:
+            query = query.filter(DistributionDay.date <= as_of_date)
+
+        active = query.order_by(DistributionDay.date.desc()).all()
         
         raw_count = len(active)
         active_dates = [d.date for d in active]
@@ -562,7 +594,9 @@ class DistributionDayTracker:
         
         # No historical record - calculate from active D-day dates
         # Use raw detected dates, not override-affected count
-        _, active_dates, _ = self._get_active_distribution_days(symbol)
+        _, active_dates, _ = self._get_active_distribution_days(
+            symbol, as_of_date=reference_date
+        )
         
         if not active_dates:
             return 0
@@ -691,7 +725,9 @@ class DistributionDayTracker:
             qqq_dates=nasdaq_result.active_dates,
             spy_expired_today=sp500_result.expired_d_days,
             qqq_expired_today=nasdaq_result.expired_d_days,
-            expiration_details=all_expirations
+            expiration_details=all_expirations,
+            spy_new_d_days=sp500_result.new_d_days_found,
+            qqq_new_d_days=nasdaq_result.new_d_days_found
         )
     
     def get_distribution_day_details(self, symbol: str) -> List[Dict]:
