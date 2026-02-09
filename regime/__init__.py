@@ -75,6 +75,13 @@ from .historical_data import (
     fetch_index_daily
 )
 
+from .fear_greed_client import (
+    FearGreedClient,
+    FearGreedData,
+    FearGreedHistoryPoint,
+    classify_score
+)
+
 __all__ = [
     # Enums
     'RegimeType',
@@ -115,6 +122,12 @@ __all__ = [
     'MassiveHistoricalClient',
     'TradingCalendar',
     
+    # Fear & Greed
+    'FearGreedClient',
+    'FearGreedData',
+    'FearGreedHistoryPoint',
+    'classify_score',
+
     # Functions
     'create_regime_tables',
     'create_overnight_data',

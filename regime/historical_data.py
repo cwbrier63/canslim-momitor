@@ -347,17 +347,19 @@ def fetch_index_daily(
     symbols: List[str] = None,
     lookback_days: int = 35,
     config: dict = None,
-    use_indices: bool = True
+    use_indices: bool = True,
+    end_date: date = None
 ) -> Dict[str, List[DailyBar]]:
     """
     Fetch daily bars for market indices/ETFs.
-    
+
     Args:
         symbols: List of symbols (default: SPX and COMP if use_indices, else SPY and QQQ)
         lookback_days: Calendar days to fetch
         config: Config dict with API key
         use_indices: If True, use actual indices (SPX, COMP). If False, use ETFs (SPY, QQQ)
-        
+        end_date: End date for data (default: today)
+
     Returns:
         Dict mapping symbol -> list of DailyBar
     """
@@ -366,36 +368,38 @@ def fetch_index_daily(
             symbols = ['SPX', 'COMP']
         else:
             symbols = ['SPY', 'QQQ']
-    
+
     if config:
         client = MassiveHistoricalClient.from_config(config)
     else:
         client = MassiveHistoricalClient()
-    
-    return client.get_multiple_symbols(symbols, lookback_days)
+
+    return client.get_multiple_symbols(symbols, lookback_days, end_date)
 
 
 def fetch_spy_qqq_daily(
     lookback_days: int = 35,
     config: dict = None,
-    use_indices: bool = False
+    use_indices: bool = False,
+    end_date: date = None
 ) -> Dict[str, List[DailyBar]]:
     """
     Backward-compatible function to fetch SPY/QQQ or SPX/COMP data.
-    
+
     Args:
         lookback_days: Number of calendar days to fetch
         config: Config dict with API key
         use_indices: If True, fetch SPX/COMP. If False, fetch SPY/QQQ (default)
-        
+        end_date: End date for data (default: today)
+
     Returns:
         Dict with keys 'SPY' and 'QQQ' (or 'SPX' and 'COMP')
     """
     logger.info(f"fetch_spy_qqq_daily called with use_indices={use_indices}")
-    
+
     if use_indices:
         logger.info("Using actual indices: SPX (S&P 500) and COMP (Nasdaq Composite)")
-        data = fetch_index_daily(['SPX', 'COMP'], lookback_days, config, use_indices=True)
+        data = fetch_index_daily(['SPX', 'COMP'], lookback_days, config, use_indices=True, end_date=end_date)
         # Remap keys for backward compatibility
         return {
             'SPY': data.get('SPX', []),
@@ -403,7 +407,7 @@ def fetch_spy_qqq_daily(
         }
     else:
         logger.info("Using ETFs: SPY and QQQ")
-        return fetch_index_daily(['SPY', 'QQQ'], lookback_days, config, use_indices=False)
+        return fetch_index_daily(['SPY', 'QQQ'], lookback_days, config, use_indices=False, end_date=end_date)
 
 
 if __name__ == '__main__':

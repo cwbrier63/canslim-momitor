@@ -413,8 +413,10 @@ class PositionThread(BaseThread):
                         repo.update_price(position, price, datetime.now())
                         
                         # Update max gain tracking
-                        if position.avg_cost and position.avg_cost > 0:
-                            gain_pct = ((price - position.avg_cost) / position.avg_cost) * 100
+                        # Use avg_cost if set, otherwise fall back to e1_price
+                        cost_basis = position.avg_cost or position.e1_price
+                        if cost_basis and cost_basis > 0:
+                            gain_pct = ((price - cost_basis) / cost_basis) * 100
                             current_max = self._max_gains.get(symbol, 0)
                             if gain_pct > current_max:
                                 self._max_gains[symbol] = gain_pct

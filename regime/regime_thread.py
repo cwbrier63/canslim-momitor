@@ -134,6 +134,8 @@ class RegimeThread(BaseThread):
                 rally_expiration_pct=dist_config.get('rally_expiration_pct'),
                 trend_comparison_days=dist_config.get('trend_comparison_days'),
                 enable_stalling=dist_config.get('enable_stalling', False),
+                min_volume_increase_pct=dist_config.get('min_volume_increase_pct'),
+                decline_rounding_decimals=dist_config.get('decline_rounding_decimals'),
                 use_indices=self.use_indices
             )
 
@@ -441,7 +443,17 @@ class RegimeThread(BaseThread):
             )
             score.entry_risk_score = entry_risk_score
             score.entry_risk_level = entry_risk_level
-            
+
+            # Step 8: Fetch CNN Fear & Greed Index (display only)
+            fear_greed_data = self._get_fear_greed_data()
+            score.fear_greed_data = fear_greed_data
+
+            # Step 9: Fetch VIX data (display only)
+            vix_data = self._get_vix_data()
+            if vix_data:
+                score.vix_close = vix_data.close
+                score.vix_previous_close = vix_data.previous_close
+
             self.logger.info(
                 f"Regime: {score.regime.value} "
                 f"(score: {score.composite_score:+.2f}, "
@@ -489,6 +501,48 @@ class RegimeThread(BaseThread):
             self.logger.warning(f"Could not get overnight futures: {e}")
             return create_overnight_data(0.0, 0.0, 0.0)
     
+    def _get_fear_greed_data(self):
+        """Fetch CNN Fear & Greed Index data (non-critical, returns None on failure)."""
+        fg_config = self.config.get('market_regime', {}).get('fear_greed', {})
+        if not fg_config.get('enabled', True):
+            self.logger.debug("CNN Fear & Greed disabled in config")
+            return None
+
+        try:
+            from .fear_greed_client import FearGreedClient
+            client = FearGreedClient.from_config(self.config)
+            data = client.fetch_current()
+            if data:
+                self.logger.info(
+                    f"CNN F&G: {data.score:.0f} ({data.rating})"
+                    f"{f', prev: {data.previous_close:.0f}' if data.previous_close else ''}"
+                )
+            return data
+        except Exception as e:
+            self.logger.warning(f"Could not fetch Fear & Greed data: {e}")
+            return None
+
+    def _get_vix_data(self):
+        """Fetch VIX data (non-critical, returns None on failure)."""
+        vix_config = self.config.get('market_regime', {}).get('vix', {})
+        if not vix_config.get('enabled', True):
+            self.logger.debug("VIX data disabled in config")
+            return None
+
+        try:
+            from .vix_client import VixClient
+            client = VixClient.from_config(self.config, ibkr_client=self.ibkr_client)
+            data = client.fetch_current()
+            if data:
+                self.logger.info(
+                    f"VIX: {data.close:.2f}"
+                    f"{f' (prev: {data.previous_close:.2f})' if data.previous_close else ''}"
+                )
+            return data
+        except Exception as e:
+            self.logger.warning(f"Could not fetch VIX data: {e}")
+            return None
+
     def _get_prior_regime(self) -> Optional[RegimeScore]:
         """Get the prior day's regime score for trend calculation."""
         if self._last_regime_score:
@@ -639,15 +693,34 @@ class RegimeThread(BaseThread):
             # Entry risk data (tactical layer)
             alert.entry_risk_score = score.entry_risk_score
             alert.entry_risk_level = score.entry_risk_level
-            
+
+            # CNN Fear & Greed data
+            if score.fear_greed_data:
+                alert.fear_greed_score = score.fear_greed_data.score
+                alert.fear_greed_rating = score.fear_greed_data.rating
+                alert.fear_greed_previous = score.fear_greed_data.previous_close
+                alert.fear_greed_timestamp = score.fear_greed_data.timestamp
+
+            # VIX data
+            if score.vix_close is not None:
+                alert.vix_close = score.vix_close
+                alert.vix_previous_close = score.vix_previous_close
+
             # Check for existing record
             existing = session.query(MarketRegimeAlert).filter(
                 MarketRegimeAlert.date == alert.date
             ).first()
             
             if existing:
+                # Preserve auxiliary fields if new alert has None (API may have failed)
+                preserve_fields = {
+                    'fear_greed_score', 'fear_greed_rating', 'fear_greed_previous', 'fear_greed_timestamp',
+                    'vix_close', 'vix_previous_close',
+                }
                 for key, value in alert.__dict__.items():
                     if not key.startswith('_') and key != 'id':
+                        if key in preserve_fields and value is None:
+                            continue  # Don't overwrite existing data with None
                         setattr(existing, key, value)
             else:
                 session.add(alert)
@@ -684,12 +757,15 @@ class RegimeThread(BaseThread):
                 ibd_status, ibd_min, ibd_max, ibd_updated = self._get_ibd_exposure()
                 
                 success = self._discord_regime.send_regime_alert(
-                    score, 
+                    score,
                     verbose=True,
                     ibd_status=ibd_status,
                     ibd_exposure_min=ibd_min,
                     ibd_exposure_max=ibd_max,
-                    ibd_updated_at=ibd_updated
+                    ibd_updated_at=ibd_updated,
+                    fear_greed_data=score.fear_greed_data,
+                    vix_close=score.vix_close,
+                    vix_previous_close=score.vix_previous_close,
                 )
                 
                 if success:

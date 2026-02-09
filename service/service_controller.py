@@ -443,13 +443,15 @@ class ServiceController:
             )
 
         # Phase 2: Pass scoring engine, position sizer, and alert service to breakout thread
+        # Merge breakout config with full config so thread has access to Polygon API key for MAs
+        full_breakout_config = {**self.config, **breakout_config}
         self.threads['breakout'] = BreakoutThread(
             shutdown_event=self.shutdown_event,
             poll_interval=thread_config.get('breakout_interval', 60),
             db_session_factory=self.db_session_factory,
             ibkr_client=self.ibkr_client,
             discord_notifier=self.discord_notifier,
-            config=breakout_config,
+            config=full_breakout_config,
             # Phase 2 dependencies
             scoring_engine=self.scoring_engine,
             position_sizer=self.position_sizer,

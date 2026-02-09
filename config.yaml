@@ -133,13 +133,18 @@ market_regime:
   enabled: true
   alert_time: "08:30"             # 8:30 AM ET (7:30 AM CT)
   use_indices: false              # true = SPX/COMP, false = SPY/QQQ
+  fear_greed:
+    enabled: true                 # Fetch CNN Fear & Greed Index
+    cache_minutes: 60             # Cache API results for this many minutes
 
 # Distribution Day Tracking
 distribution_days:
-  decline_threshold: -0.2         # Minimum decline % to count as D-day
+  decline_threshold: -0.25        # Minimum decline % to count as D-day (tuned for MarketSurge parity)
   lookback_days: 25               # Rolling window for D-days
   rally_expiration_pct: 5.0       # Rally % needed to expire a D-day
   enable_stalling: false          # Set true to detect stall days
+  min_volume_increase_pct: 9.0    # Min % volume must exceed prior day (tuned for MarketSurge parity)
+  decline_rounding_decimals: 2    # Round pct_change before threshold comparison
 
 # Reports Configuration
 reports:

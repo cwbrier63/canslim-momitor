@@ -190,17 +190,20 @@ Direction:   {score.regime_trend.upper()}
 """
     
     def format_regime_alert(
-        self, 
-        score: RegimeScore, 
+        self,
+        score: RegimeScore,
         verbose: bool = True,
         ibd_status: IBDMarketStatus = None,
         ibd_exposure_min: int = None,
         ibd_exposure_max: int = None,
-        ibd_updated_at: datetime = None
+        ibd_updated_at: datetime = None,
+        fear_greed_data=None,
+        vix_close=None,
+        vix_previous_close=None,
     ) -> str:
         """
         Format the regime alert message.
-        
+
         Args:
             score: RegimeScore to format
             verbose: If True, full format. If False, condensed one-liner.
@@ -208,19 +211,25 @@ Direction:   {score.regime_trend.upper()}
             ibd_exposure_min: Manual IBD exposure minimum %
             ibd_exposure_max: Manual IBD exposure maximum %
             ibd_updated_at: When IBD exposure was last updated
-        
+            fear_greed_data: Optional FearGreedData for sentiment display
+            vix_close: Current VIX level
+            vix_previous_close: Previous day's VIX close
+
         Returns:
             Formatted message string
         """
         if not verbose:
             return self._format_condensed(score)
-        
+
         return self._format_full(
-            score, 
+            score,
             ibd_status=ibd_status,
             ibd_exposure_min=ibd_exposure_min,
             ibd_exposure_max=ibd_exposure_max,
-            ibd_updated_at=ibd_updated_at
+            ibd_updated_at=ibd_updated_at,
+            fear_greed_data=fear_greed_data,
+            vix_close=vix_close,
+            vix_previous_close=vix_previous_close,
         )
     
     def _format_condensed(self, score: RegimeScore) -> str:
@@ -246,22 +255,26 @@ Direction:   {score.regime_trend.upper()}
         )
     
     def _format_full(
-        self, 
+        self,
         score: RegimeScore,
         ibd_status: IBDMarketStatus = None,
         ibd_exposure_min: int = None,
         ibd_exposure_max: int = None,
-        ibd_updated_at: datetime = None
+        ibd_updated_at: datetime = None,
+        fear_greed_data=None,
+        vix_close=None,
+        vix_previous_close=None,
     ) -> str:
         """
         Full detailed format with separated IBD exposure and entry risk.
-        
+
         Args:
             score: RegimeScore with calculated entry risk
             ibd_status: Manual IBD market status from MarketSurge
             ibd_exposure_min: Manual IBD exposure minimum %
             ibd_exposure_max: Manual IBD exposure maximum %
             ibd_updated_at: When IBD exposure was last updated
+            fear_greed_data: Optional FearGreedData for sentiment section
         """
         dist = score.distribution_data
         overnight = score.overnight_data
@@ -312,6 +325,12 @@ Direction:   {score.regime_trend.upper()}
         # FTD/Market Phase section
         ftd_section = self._build_ftd_section(ftd, score.market_phase) if ftd else ""
 
+        # Sentiment section (CNN Fear & Greed + VIX)
+        fg_data = fear_greed_data or getattr(score, 'fear_greed_data', None)
+        _vix = vix_close if vix_close is not None else getattr(score, 'vix_close', None)
+        _vix_prev = vix_previous_close if vix_previous_close is not None else getattr(score, 'vix_previous_close', None)
+        sentiment_section = self._build_sentiment_section(fg_data, vix_close=_vix, vix_previous_close=_vix_prev)
+
         message = f"""{mention}__**🌅 MORNING MARKET REGIME ALERT**__
 *{date_str}*
 
@@ -334,7 +353,7 @@ Direction:   {score.regime_trend.upper()}
 ━━━━━━━━━━━━━━━━━━━━
 {ftd_section}
 ━━━━━━━━━━━━━━━━━━━━
-{entry_risk_section}
+{entry_risk_section}{sentiment_section}
 ━━━━━━━━━━━━━━━━━━━━
 {guidance_section}
 """
@@ -396,6 +415,55 @@ Direction:   {score.regime_trend.upper()}
 *{desc}*
 """
     
+    def _build_sentiment_section(self, fear_greed_data, vix_close=None, vix_previous_close=None) -> str:
+        """Build the market sentiment section (CNN Fear & Greed + VIX)."""
+        lines = []
+
+        # Fear & Greed line
+        if fear_greed_data:
+            score = fear_greed_data.score
+            rating = fear_greed_data.rating
+
+            emoji_map = {
+                'Extreme Fear': '\U0001f631',
+                'Fear': '\U0001f628',
+                'Neutral': '\U0001f610',
+                'Greed': '\U0001f60f',
+                'Extreme Greed': '\U0001f911',
+            }
+            emoji = emoji_map.get(rating, '\U0001f610')
+
+            trend_str = ""
+            if fear_greed_data.previous_close and fear_greed_data.previous_close > 0:
+                prev = fear_greed_data.previous_close
+                if score != prev:
+                    trend_str = f" ({score - prev:+.0f} from {prev:.0f} yesterday)"
+                else:
+                    trend_str = f" (unchanged from {prev:.0f})"
+
+            lines.append(f"**{emoji} SENTIMENT** CNN Fear & Greed: **{score:.0f}** — {rating}{trend_str}")
+
+        # VIX line
+        if vix_close is not None:
+            from .vix_client import classify_vix, get_vix_emoji
+            vix_emoji = get_vix_emoji(vix_close)
+            vix_rating = classify_vix(vix_close)
+
+            vix_trend = ""
+            if vix_previous_close and vix_previous_close > 0:
+                delta = vix_close - vix_previous_close
+                if delta != 0:
+                    vix_trend = f" ({delta:+.2f} from {vix_previous_close:.2f} yesterday)"
+                else:
+                    vix_trend = f" (unchanged from {vix_previous_close:.2f})"
+
+            lines.append(f"**{vix_emoji} VIX:** {vix_close:.2f} — {vix_rating}{vix_trend}")
+
+        if not lines:
+            return ""
+
+        return "\n" + "\n".join(lines) + "\n"
+
     def _build_entry_risk_bar(self, score: float) -> str:
         """Build visual bar for entry risk score."""
         # Score range: -1.5 to +1.5
@@ -784,18 +852,21 @@ FTD Success: {success_count} | Failed: {failed_count} | Rate: {success_rate:.0f}
             return False
     
     def send_regime_alert(
-        self, 
-        score: RegimeScore, 
+        self,
+        score: RegimeScore,
         verbose: bool = True,
         dry_run: bool = False,
         ibd_status: IBDMarketStatus = None,
         ibd_exposure_min: int = None,
         ibd_exposure_max: int = None,
-        ibd_updated_at: datetime = None
+        ibd_updated_at: datetime = None,
+        fear_greed_data=None,
+        vix_close=None,
+        vix_previous_close=None,
     ) -> bool:
         """
         Send a regime alert to Discord.
-        
+
         Args:
             score: RegimeScore to send
             verbose: If True, send full format. If False, send condensed.
@@ -804,17 +875,23 @@ FTD Success: {success_count} | Failed: {failed_count} | Rate: {success_rate:.0f}
             ibd_exposure_min: Manual IBD exposure minimum %
             ibd_exposure_max: Manual IBD exposure maximum %
             ibd_updated_at: When IBD exposure was last updated
-        
+            fear_greed_data: Optional FearGreedData for sentiment display
+            vix_close: Current VIX level
+            vix_previous_close: Previous day's VIX close
+
         Returns:
             True if sent successfully (or dry run), False otherwise
         """
         message = self.format_regime_alert(
-            score, 
+            score,
             verbose=verbose,
             ibd_status=ibd_status,
             ibd_exposure_min=ibd_exposure_min,
             ibd_exposure_max=ibd_exposure_max,
-            ibd_updated_at=ibd_updated_at
+            ibd_updated_at=ibd_updated_at,
+            fear_greed_data=fear_greed_data,
+            vix_close=vix_close,
+            vix_previous_close=vix_previous_close,
         )
         
         if dry_run:

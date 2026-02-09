@@ -8,6 +8,8 @@ Usage:
     python -m canslim_monitor service                # Run monitoring service
     python -m canslim_monitor demo                   # Run demo
     python -m canslim_monitor earnings               # Update earnings dates
+    python -m canslim_monitor regime status          # Show regime status
+    python -m canslim_monitor regime seed --start 2024-01-01  # Seed historical data
     python -m canslim_monitor test_position          # Test position monitor
     python -m canslim_monitor test_position --live   # Live validation
 """
@@ -231,6 +233,231 @@ def cmd_earnings(args):
     return 0
 
 
+def cmd_regime(args):
+    """Manage market regime data (seed historical data)."""
+    action = getattr(args, 'action', 'status')
+
+    if action == 'seed':
+        from datetime import datetime, timedelta
+        from canslim_monitor.utils.config import load_config
+
+        # Validate dates
+        if not args.start:
+            print("Error: --start date required for seeding")
+            print("Usage: python -m canslim_monitor regime seed --start 2024-01-01")
+            return 1
+
+        try:
+            start_date = datetime.strptime(args.start, "%Y-%m-%d").date()
+        except ValueError:
+            print(f"Error: Invalid start date format: {args.start}")
+            print("Use YYYY-MM-DD format")
+            return 1
+
+        if args.end:
+            try:
+                end_date = datetime.strptime(args.end, "%Y-%m-%d").date()
+            except ValueError:
+                print(f"Error: Invalid end date format: {args.end}")
+                return 1
+        else:
+            end_date = datetime.now().date() - timedelta(days=1)
+
+        # Load config
+        config = load_config(args.config)
+
+        # Database path
+        db_path = args.database or config.get('database', {}).get('path') or DEFAULT_DB_PATH
+
+        print("=" * 60)
+        print("HISTORICAL REGIME SEEDING")
+        print("=" * 60)
+        print(f"Database: {db_path}")
+        print(f"Date range: {start_date} to {end_date}")
+        if args.clear:
+            print("Mode: Clear existing data before seeding")
+
+        # Show D-day tuning parameters
+        dist_config = config.get('distribution_days', {})
+        print(f"\nD-Day Parameters:")
+        print(f"  decline_threshold:        {dist_config.get('decline_threshold', -0.2)}")
+        print(f"  min_volume_increase_pct:  {dist_config.get('min_volume_increase_pct', 2.0)}")
+        print(f"  decline_rounding_decimals:{dist_config.get('decline_rounding_decimals', 2)}")
+        print(f"  enable_stalling:          {dist_config.get('enable_stalling', False)}")
+        print()
+
+        # Import and run seeder
+        from sqlalchemy import create_engine
+        from sqlalchemy.orm import sessionmaker
+        from canslim_monitor.regime.historical_seeder import HistoricalSeeder
+        from canslim_monitor.regime.models_regime import Base
+        from canslim_monitor.regime.ftd_tracker import Base as FTDBase
+
+        engine = create_engine(f"sqlite:///{db_path}")
+        Base.metadata.create_all(engine)
+        FTDBase.metadata.create_all(engine)
+
+        Session = sessionmaker(bind=engine)
+        session = Session()
+
+        try:
+            seeder = HistoricalSeeder(
+                db_session=session,
+                config=config,
+                use_indices=args.use_indices
+            )
+
+            if args.clear:
+                print(f"Clearing existing data from {start_date} to {end_date}...")
+                deleted = seeder.clear_historical_data(
+                    start_date=start_date,
+                    end_date=end_date,
+                    confirm=True
+                )
+                print(f"Deleted {deleted} records\n")
+
+            print(f"Seeding regime data...")
+            result = seeder.seed_range(start_date, end_date, verbose=True)
+
+            print("\n" + "=" * 60)
+            print("SEEDING COMPLETE")
+            print("=" * 60)
+            print(f"Days processed: {result.days_processed}")
+            print(f"Distribution days created: {result.d_days_created}")
+            print(f"Regime alerts created: {result.regime_alerts_created}")
+            print(f"Phase changes recorded: {result.phase_changes_recorded}")
+            print(f"FTDs detected: {result.ftds_detected}")
+
+            if result.errors:
+                print(f"\nErrors ({len(result.errors)}):")
+                for error in result.errors[:10]:
+                    print(f"  - {error}")
+                if len(result.errors) > 10:
+                    print(f"  ... and {len(result.errors) - 10} more")
+
+            # Backfill CNN Fear & Greed data into seeded regime alerts
+            fg_config = config.get('market_regime', {}).get('fear_greed', {})
+            if fg_config.get('enabled', True):
+                print("\nBackfilling CNN Fear & Greed data...")
+                try:
+                    from canslim_monitor.regime.fear_greed_client import FearGreedClient, classify_score
+                    from canslim_monitor.regime.models_regime import MarketRegimeAlert
+                    client = FearGreedClient.from_config(config)
+                    days_diff = (end_date - start_date).days + 1
+                    history = client.fetch_historical(days=min(days_diff, 365))
+                    if history:
+                        # Build date->score map (convert datetime to date for matching)
+                        fg_map = {}
+                        for h in history:
+                            d = h.date.date() if hasattr(h.date, 'date') else h.date
+                            fg_map[d] = h
+                        # Update regime alerts that lack F&G data
+                        alerts = session.query(MarketRegimeAlert).filter(
+                            MarketRegimeAlert.date >= start_date,
+                            MarketRegimeAlert.date <= end_date,
+                            MarketRegimeAlert.fear_greed_score.is_(None)
+                        ).all()
+                        updated = 0
+                        for alert in alerts:
+                            fg = fg_map.get(alert.date)
+                            if not fg:
+                                # Try adjacent days (CNN timestamps may shift by 1)
+                                fg = fg_map.get(alert.date - timedelta(days=1))
+                            if fg:
+                                alert.fear_greed_score = fg.score
+                                alert.fear_greed_rating = classify_score(fg.score)
+                                updated += 1
+                        session.commit()
+                        print(f"  F&G backfill: {updated} records updated ({len(history)} historical points available)")
+                    else:
+                        print("  F&G backfill: no historical data returned from API")
+                except Exception as e:
+                    print(f"  F&G backfill failed (non-critical): {e}")
+
+            return 0 if result.success else 1
+        finally:
+            session.close()
+
+    elif action == 'status':
+        # Show current regime status
+        from canslim_monitor.utils.config import load_config
+        from canslim_monitor.data.database import get_database
+
+        config = load_config(args.config)
+        db_path = args.database or config.get('database', {}).get('path') or DEFAULT_DB_PATH
+
+        print("=" * 60)
+        print("MARKET REGIME STATUS")
+        print("=" * 60)
+        print(f"Database: {db_path}")
+        print()
+
+        # Query regime data
+        from sqlalchemy import create_engine, func
+        from sqlalchemy.orm import sessionmaker
+        from canslim_monitor.regime.models_regime import DistributionDay, MarketPhaseHistory
+
+        engine = create_engine(f"sqlite:///{db_path}")
+        Session = sessionmaker(bind=engine)
+        session = Session()
+
+        try:
+            # Count distribution days
+            d_day_count = session.query(func.count(DistributionDay.id)).scalar() or 0
+
+            # Get date range
+            first_d_day = session.query(func.min(DistributionDay.date)).scalar()
+            last_d_day = session.query(func.max(DistributionDay.date)).scalar()
+
+            # Count phase history
+            phase_count = session.query(func.count(MarketPhaseHistory.id)).scalar() or 0
+
+            print(f"Distribution Days: {d_day_count}")
+            if first_d_day and last_d_day:
+                print(f"Date Range: {first_d_day} to {last_d_day}")
+            print(f"Phase History Records: {phase_count}")
+
+            # Show recent phase
+            latest_phase = session.query(MarketPhaseHistory)\
+                .order_by(MarketPhaseHistory.phase_date.desc())\
+                .first()
+
+            if latest_phase:
+                print(f"\nCurrent Phase: {latest_phase.new_phase}")
+                print(f"Since: {latest_phase.phase_date}")
+
+            # Show latest regime alert with F&G data
+            from canslim_monitor.regime.models_regime import MarketRegimeAlert
+            latest_alert = session.query(MarketRegimeAlert)\
+                .order_by(MarketRegimeAlert.date.desc())\
+                .first()
+
+            if latest_alert:
+                print(f"\nLatest Regime Alert: {latest_alert.date}")
+                print(f"  Composite Score: {latest_alert.composite_score:+.2f}" if latest_alert.composite_score is not None else "  Composite Score: --")
+                print(f"  Regime: {latest_alert.regime.value if latest_alert.regime else '--'}")
+                print(f"  D-Days: SPY={latest_alert.spy_d_count or 0}, QQQ={latest_alert.qqq_d_count or 0}")
+
+                if latest_alert.fear_greed_score is not None:
+                    print(f"\n  CNN Fear & Greed:")
+                    print(f"    Score: {latest_alert.fear_greed_score:.1f} — {latest_alert.fear_greed_rating or 'N/A'}")
+                    if latest_alert.fear_greed_previous is not None:
+                        delta = latest_alert.fear_greed_score - latest_alert.fear_greed_previous
+                        arrow = "↑" if delta > 0 else "↓" if delta < 0 else "→"
+                        print(f"    Previous: {latest_alert.fear_greed_previous:.0f} ({arrow} {abs(delta):.0f})")
+                else:
+                    print(f"\n  CNN Fear & Greed: Not available")
+                    print(f"    Run 'python -m cli.fear_greed_cli seed' to backfill")
+
+            return 0
+        finally:
+            session.close()
+
+    else:
+        print(f"Unknown action: {action}")
+        return 1
+
+
 def cmd_test_position(args):
     """Run position monitor tests."""
     from canslim_monitor.tests.test_position_monitor_cli import (
@@ -293,6 +520,7 @@ Commands:
   import         Import positions from Excel
   service        Run the monitoring service
   earnings       Update earnings dates from Polygon/Massive
+  regime         Manage market regime data (seed historical)
   test_position  Test the position monitor
   demo           Run the demo
 
@@ -303,12 +531,19 @@ Examples:
   python -m canslim_monitor import positions.xlsx --clear
   python -m canslim_monitor service
   python -m canslim_monitor -c my_config.yaml service
-  
+
   # Earnings management
   python -m canslim_monitor earnings                 # Update all
   python -m canslim_monitor earnings --check         # Show upcoming
   python -m canslim_monitor earnings --symbol NVDA   # Single symbol
-  
+
+  # Market regime management
+  python -m canslim_monitor regime                   # Show status
+  python -m canslim_monitor regime status            # Show status
+  python -m canslim_monitor regime seed --start 2024-01-01  # Seed from date
+  python -m canslim_monitor regime seed --start 2024-01-01 --end 2024-12-31
+  python -m canslim_monitor regime seed --start 2024-01-01 --clear  # Replace data
+
   # Position monitor testing
   python -m canslim_monitor test_position              # Run test scenarios
   python -m canslim_monitor test_position -i           # Interactive mode
@@ -379,6 +614,36 @@ Config search order:
     
     # Demo command
     demo_parser = subparsers.add_parser('demo', help='Run demo')
+
+    # Regime command
+    regime_parser = subparsers.add_parser('regime', help='Manage market regime data')
+    regime_parser.add_argument(
+        'action',
+        nargs='?',
+        default='status',
+        choices=['seed', 'status'],
+        help='Action: seed (load historical data) or status (show current state)'
+    )
+    regime_parser.add_argument(
+        '--start',
+        type=str,
+        help='Start date for seeding (YYYY-MM-DD)'
+    )
+    regime_parser.add_argument(
+        '--end',
+        type=str,
+        help='End date for seeding (YYYY-MM-DD), defaults to yesterday'
+    )
+    regime_parser.add_argument(
+        '--clear',
+        action='store_true',
+        help='Clear existing data in range before seeding'
+    )
+    regime_parser.add_argument(
+        '--use-indices',
+        action='store_true',
+        help='Use index data (^GSPC, ^IXIC) instead of ETFs (SPY, QQQ)'
+    )
     
     # Test Position command
     test_parser = subparsers.add_parser('test_position', help='Test position monitor')
@@ -430,6 +695,8 @@ Config search order:
         sys.exit(cmd_earnings(args))
     elif args.command == 'demo':
         cmd_demo(args)
+    elif args.command == 'regime':
+        sys.exit(cmd_regime(args))
     elif args.command == 'test_position':
         sys.exit(cmd_test_position(args))
     else:

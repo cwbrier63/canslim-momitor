@@ -45,6 +45,8 @@ def get_futures_snapshot(ibkr_client) -> Tuple[float, float, float]:
         Tuple of (ES change %, NQ change %, YM change %)
         Returns (0.0, 0.0, 0.0) if data unavailable
     """
+    import time
+
     logger.info("Getting futures snapshot...")
 
     if not ibkr_client:
@@ -54,6 +56,10 @@ def get_futures_snapshot(ibkr_client) -> Tuple[float, float, float]:
     if not ibkr_client.is_connected():
         logger.warning("IBKR not connected - cannot get futures data")
         return (0.0, 0.0, 0.0)
+
+    # Brief warm-up to ensure IBKR connection is fully established
+    # This helps when service just started and IBKR just connected
+    time.sleep(2.0)
 
     try:
         # Get session open time
@@ -167,12 +173,12 @@ def _get_futures_change(ibkr_client, symbol: str, session_open_time: datetime) -
             return 0.0
 
         # Run the async operation in the IBKR client's event loop
-        # Increased timeout to 30s since we now wait up to 5s for market data
+        # Timeout of 45s to accommodate up to 8s for market data + historical fetch
         future = asyncio.run_coroutine_threadsafe(
             _async_get_futures_change(ibkr_client._ib, symbol, session_open_time),
             ibkr_client._loop
         )
-        return future.result(timeout=30.0)
+        return future.result(timeout=45.0)
 
     except asyncio.TimeoutError:
         logger.warning(f"Timeout getting {symbol} futures change")
@@ -217,19 +223,25 @@ async def _async_get_futures_change(ib, symbol: str, session_open_time: datetime
 
         logger.debug(f"Qualified {symbol} contract: {contract.localSymbol}, conId={contract.conId}")
 
+        # Helper to safely convert to float
+        def safe_float(val, default=0.0):
+            if val is None or (isinstance(val, float) and val != val):  # NaN check
+                return default
+            return float(val)
+
         # Get current price via market data - use streaming mode, not snapshot
         # Snapshot mode (True) can be unreliable for futures
         ticker = ib.reqMktData(contract, '', False, False)  # streaming mode
 
         # Wait for data with retries - futures may need more time
+        # NQ in particular can be slow to return data
         current_price = 0.0
-        for attempt in range(5):  # Try for up to 5 seconds
-            await asyncio.sleep(1.0)
+        max_attempts = 8  # Increased from 5 to 8 for better reliability
 
-            def safe_float(val, default=0.0):
-                if val is None or (isinstance(val, float) and val != val):  # NaN check
-                    return default
-                return float(val)
+        for attempt in range(max_attempts):
+            # Check for data first before sleeping (data may arrive quickly)
+            if attempt > 0:
+                await asyncio.sleep(1.0)
 
             # Try last price first
             current_price = safe_float(ticker.last)
@@ -251,17 +263,32 @@ async def _async_get_futures_change(ib, symbol: str, session_open_time: datetime
                 logger.debug(f"{symbol}: Got bid/ask midpoint {current_price} on attempt {attempt+1}")
                 break
 
-            logger.debug(f"{symbol}: No price on attempt {attempt+1}, last={ticker.last}, bid={ticker.bid}, ask={ticker.ask}")
+            # Try marketPrice() as last resort (computed by ib_insync from available data)
+            mkt_price = safe_float(ticker.marketPrice())
+            if mkt_price > 0 and attempt >= 5:
+                logger.warning(f"{symbol}: Using marketPrice {mkt_price} as fallback")
+                current_price = mkt_price
+                break
+
+            if attempt < max_attempts - 1:
+                logger.debug(f"{symbol}: No price on attempt {attempt+1}, last={ticker.last}, close={ticker.close}, bid={ticker.bid}, ask={ticker.ask}")
 
         # Cancel market data
         ib.cancelMktData(contract)
 
-        if current_price <= 0:
-            logger.warning(f"No current price for {symbol} after 5 attempts")
-            return 0.0
+        # Get session open price (and current price fallback) from historical data
+        session_open_price, hist_current_price = await _get_session_prices(ib, contract, session_open_time)
 
-        # Get session open price from historical data
-        session_open_price = await _get_session_open_price(ib, contract, session_open_time)
+        # If streaming market data failed, use the latest historical bar close
+        if current_price <= 0:
+            if hist_current_price and hist_current_price > 0:
+                current_price = hist_current_price
+                logger.info(f"{symbol}: Using historical bar close {current_price:.2f} (streaming data unavailable)")
+            else:
+                logger.warning(f"No current price for {symbol} after {max_attempts} attempts and no historical fallback")
+                return 0.0
+
+        session_open_price = session_open_price
 
         if session_open_price is None or session_open_price <= 0:
             logger.warning(f"Could not get session open price for {symbol}")
@@ -279,14 +306,16 @@ async def _async_get_futures_change(ib, symbol: str, session_open_time: datetime
         return 0.0
 
 
-async def _get_session_open_price(ib, contract, session_open_time: datetime) -> Optional[float]:
+async def _get_session_prices(ib, contract, session_open_time: datetime) -> Tuple[Optional[float], Optional[float]]:
     """
-    Get the price at Globex session open using historical data.
+    Get session open price and latest bar close from historical data.
 
-    Fetches hourly bars and finds the bar at or near the 6 PM session open.
+    Fetches hourly bars and returns:
+    - Session open price (bar at or near 6 PM session open)
+    - Latest bar close (most recent available price, used as streaming data fallback)
     """
     try:
-        logger.debug(f"Fetching session open price for {contract.symbol}, session_open={session_open_time}")
+        logger.debug(f"Fetching session prices for {contract.symbol}, session_open={session_open_time}")
 
         # Request historical data for the past 2 days to ensure we have the session open
         bars = await ib.reqHistoricalDataAsync(
@@ -300,13 +329,17 @@ async def _get_session_open_price(ib, contract, session_open_time: datetime) -> 
 
         if not bars:
             logger.warning(f"No historical bars returned for {contract.symbol}")
-            return None
+            return None, None
 
         logger.debug(f"Got {len(bars)} historical bars for {contract.symbol}")
+
+        # Latest bar close = current price fallback
+        latest_close = bars[-1].close if bars else None
 
         # Find the bar at or closest to session open hour (6 PM) on the correct day
         session_open_hour = session_open_time.hour
         session_open_date = session_open_time.date()
+        session_open_price = None
 
         # First pass: look for exact match
         for bar in bars:
@@ -324,33 +357,36 @@ async def _get_session_open_price(ib, contract, session_open_time: datetime) -> 
             # Check if this bar is at the session open hour and date
             if bar_time_et.hour == session_open_hour and bar_time_et.date() == session_open_date:
                 logger.debug(f"Found exact session open bar: {bar_time_et} -> {bar.open}")
-                return bar.open
+                session_open_price = bar.open
+                break
 
         # Second pass: find closest bar after session open
-        logger.debug(f"Exact session open not found, searching for closest bar after {session_open_time}")
-        for bar in bars:
-            bar_time = bar.date
-            if hasattr(bar_time, 'astimezone'):
-                bar_time_et = bar_time.astimezone(ET_TIMEZONE)
-            elif hasattr(bar_time, 'tzinfo') and bar_time.tzinfo is None:
-                bar_time_et = ET_TIMEZONE.localize(bar_time)
-            else:
-                bar_time_et = bar_time
+        if session_open_price is None:
+            logger.debug(f"Exact session open not found, searching for closest bar after {session_open_time}")
+            for bar in bars:
+                bar_time = bar.date
+                if hasattr(bar_time, 'astimezone'):
+                    bar_time_et = bar_time.astimezone(ET_TIMEZONE)
+                elif hasattr(bar_time, 'tzinfo') and bar_time.tzinfo is None:
+                    bar_time_et = ET_TIMEZONE.localize(bar_time)
+                else:
+                    bar_time_et = bar_time
 
-            # Use first bar that's at or after session open time
-            if bar_time_et >= session_open_time:
-                logger.debug(f"Using nearest bar after session open: {bar_time_et} -> {bar.open}")
-                return bar.open
+                # Use first bar that's at or after session open time
+                if bar_time_et >= session_open_time:
+                    logger.debug(f"Using nearest bar after session open: {bar_time_et} -> {bar.open}")
+                    session_open_price = bar.open
+                    break
 
         # Last resort: use the earliest bar available
-        if bars:
+        if session_open_price is None and bars:
             first_bar = bars[0]
             logger.warning(f"Session open bar not found for {contract.symbol}, using first available bar: {first_bar.date} -> {first_bar.open}")
-            return first_bar.open
+            session_open_price = first_bar.open
 
-        return None
+        return session_open_price, latest_close
 
     except Exception as e:
-        logger.warning(f"Error getting session open price for {contract.symbol}: {e}", exc_info=True)
-        return None
+        logger.warning(f"Error getting session prices for {contract.symbol}: {e}", exc_info=True)
+        return None, None
 

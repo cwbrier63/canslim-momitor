@@ -281,7 +281,17 @@ class MarketRegimeAlert(Base):
     # This is the TACTICAL layer - whether today is good for new entries
     entry_risk_level = Column(Enum(EntryRiskLevel))  # LOW, MODERATE, ELEVATED, HIGH
     entry_risk_score = Column(Float)  # Raw score (-1.5 to +1.5, positive = favorable)
-    
+
+    # CNN Fear & Greed Index (display only - not in composite score)
+    fear_greed_score = Column(Float)         # 0-100
+    fear_greed_rating = Column(String(20))   # "Extreme Fear", "Fear", "Neutral", "Greed", "Extreme Greed"
+    fear_greed_previous = Column(Float)      # Previous close score
+    fear_greed_timestamp = Column(DateTime)  # When F&G data was fetched
+
+    # VIX (CBOE Volatility Index) - display only, not in composite score
+    vix_close = Column(Float)                # Current VIX level
+    vix_previous_close = Column(Float)       # Previous day's VIX close
+
     # Alert status
     alert_sent = Column(Boolean, default=False)
     alert_sent_at = Column(DateTime)

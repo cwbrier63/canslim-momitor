@@ -15,7 +15,47 @@ gui:
     current_view: Default
     views:
       Default:
-        hidden_columns: []
+        hidden_columns:
+        - 1
+        - 4
+        - 5
+        - 6
+        - 7
+        - 8
+        - 9
+        - 10
+        - 11
+        - 12
+        - 13
+        - 14
+        - 15
+        - 16
+        - 17
+        - 18
+        - 19
+        - 20
+        - 21
+        - 22
+        - 23
+        - 24
+        - 25
+        - 28
+        - 29
+        - 30
+        - 31
+        - 32
+        - 33
+        - 34
+        - 35
+        - 36
+        - 37
+        - 38
+        - 39
+        - 40
+        - 41
+        - 42
+        - 43
+        - 44
         column_order:
         - 0
         - 1
@@ -44,10 +84,10 @@ gui:
         - 24
         - 25
         - 26
-        - 30
         - 27
         - 28
         - 29
+        - 30
         - 31
         - 32
         - 33
@@ -63,37 +103,50 @@ gui:
         - 43
         - 44
         column_widths:
-          7: 28
-          11: 28
-          12: 28
-          13: 28
-          14: 28
-          15: 73
-          16: 28
-          17: 28
-          18: 28
-          19: 28
-          20: 28
-          21: 28
-          22: 28
-          23: 28
-          24: 28
-          25: 28
+          7: 0
+          11: 0
+          12: 0
+          13: 0
+          14: 0
+          15: 0
+          16: 0
+          17: 0
+          18: 0
+          19: 0
+          20: 0
+          21: 0
+          22: 0
+          23: 0
+          24: 0
+          25: 0
           26: 82
-          27: 74
-          28: 28
-          29: 28
-          30: 28
-          32: 28
-          33: 28
-          34: 28
-          35: 28
-          36: 28
+          27: 1559
+          28: 0
+          29: 0
+          30: 0
+          32: 0
+          33: 0
+          34: 0
+          35: 0
+          36: 0
           37: 0
-          31: 792
-          6: 97
+          31: 0
+          6: 0
+          1: 0
+          4: 0
+          5: 0
+          8: 0
+          9: 0
+          10: 0
+          38: 0
+          39: 0
+          40: 0
+          41: 0
+          42: 0
+          43: 0
+          44: 0
         sort_columns:
-        - - 31
+        - - 26
           - true
 earnings:
   warning_thresholds:
@@ -195,11 +248,19 @@ market_regime:
   enabled: true
   alert_time: 08:30
   use_indices: false
+  fear_greed:
+    enabled: true
+    cache_minutes: 60
+  vix:
+    enabled: true
+    cache_minutes: 30
 distribution_days:
-  decline_threshold: -0.2
+  decline_threshold: -0.25
   lookback_days: 25
   rally_expiration_pct: 5.0
   enable_stalling: false
+  min_volume_increase_pct: 9.0
+  decline_rounding_decimals: 2
 position_monitoring:
   stop_loss:
     base_pct: 7.0

@@ -37,6 +37,12 @@ try:
 except ImportError:
     VOLUME_SERVICE_AVAILABLE = False
 
+try:
+    from ...services.technical_data_service import TechnicalDataService
+    TECHNICAL_SERVICE_AVAILABLE = True
+except ImportError:
+    TECHNICAL_SERVICE_AVAILABLE = False
+
 
 class BreakoutThread(BaseThread):
     """
@@ -184,6 +190,20 @@ class BreakoutThread(BaseThread):
         # Cache for market regime
         self._market_regime_cache: Optional[str] = None
         self._market_regime_cache_time: Optional[datetime] = None
+
+        # Initialize TechnicalDataService for MA data
+        if TECHNICAL_SERVICE_AVAILABLE:
+            # Get Polygon API key from config
+            market_data_config = self.config.get('market_data', {})
+            polygon_config = self.config.get('polygon', {})
+            polygon_key = market_data_config.get('api_key', '') or polygon_config.get('api_key', '')
+            self.technical_service = TechnicalDataService(
+                polygon_api_key=polygon_key,
+                cache_duration_hours=4,
+                logger=logging.getLogger('canslim.breakout_technical'),
+            )
+        else:
+            self.technical_service = None
     
     def _should_run(self) -> bool:
         """Only run during market hours."""
@@ -351,6 +371,18 @@ class BreakoutThread(BaseThread):
             volume < 1000 or
             (expected_volume > 10000 and volume < expected_volume * 0.05)
         )
+
+        # Fetch MA data from TechnicalDataService and merge into price_data
+        if self.technical_service:
+            try:
+                tech_data = self.technical_service.get_technical_data(symbol)
+                if tech_data:
+                    # Use EMA 21 if available, otherwise SMA 21
+                    price_data['ma21'] = tech_data.get('ema_21') or tech_data.get('ma_21', 0)
+                    price_data['ma50'] = tech_data.get('ma_50', 0)
+                    price_data['ma200'] = tech_data.get('ma_200', 0)
+            except Exception as e:
+                self.logger.debug(f"{symbol}: Could not fetch MA data: {e}")
 
         if volume_seems_invalid and self.volume_service:
             self.logger.info(f"{symbol}: IBKR volume={volume:,} (expected ~{int(expected_volume):,}), trying Massive...")
@@ -795,14 +827,13 @@ class BreakoutThread(BaseThread):
         else:
             footer_parts.append(f"➖ {regime_upper.title()}")
         
-        # Stale pivot warning - only show if we actually know the pivot age
-        # (days_since_set=999 means unknown/no pivot_set_date)
-        if pivot_analysis and pivot_analysis.status not in ('FRESH', 'RECENT', 'UNKNOWN'):
-            if pivot_analysis.days_since_set and pivot_analysis.days_since_set < 999:
-                if pivot_analysis.days_since_set > 90:
-                    footer_parts.append(f"⚠️ Stale ({pivot_analysis.days_since_set}d)")
-                elif pivot_analysis.status == 'STALE':
-                    footer_parts.append("⚠️ Stale pivot")
+        # Stale pivot warning - only show if pivot is genuinely old (60+ days)
+        # Don't show for unknown dates (999) or recently set pivots
+        if pivot_analysis and pivot_analysis.days_since_set and pivot_analysis.days_since_set < 999:
+            if pivot_analysis.days_since_set > 90:
+                footer_parts.append(f"⚠️ Stale ({pivot_analysis.days_since_set}d)")
+            elif pivot_analysis.days_since_set > 60:
+                footer_parts.append("⚠️ Stale pivot")
         
         footer_text = " • ".join(footer_parts)
         

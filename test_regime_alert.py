@@ -119,6 +119,9 @@ def run_regime_analysis(config: dict, session, verbose: bool = False):
         decline_threshold=dist_config.get('decline_threshold'),
         lookback_days=dist_config.get('lookback_days', 25),
         rally_expiration_pct=dist_config.get('rally_expiration_pct', 5.0),
+        min_volume_increase_pct=dist_config.get('min_volume_increase_pct'),
+        decline_rounding_decimals=dist_config.get('decline_rounding_decimals'),
+        enable_stalling=dist_config.get('enable_stalling'),
         use_indices=use_indices
     )
 
@@ -248,8 +251,34 @@ def run_regime_analysis(config: dict, session, verbose: bool = False):
         qqq_dates=combined_dist.qqq_dates
     )
 
-    # Use neutral overnight data (we don't have IBKR in test mode)
+    # Try to fetch overnight futures from IBKR
     overnight = create_overnight_data(0.0, 0.0, 0.0)
+    try:
+        from regime.ibkr_futures import get_futures_snapshot
+        from integrations.ibkr_client_threadsafe import ThreadSafeIBKRClient
+
+        ibkr_config = config.get('ibkr', {})
+        from integrations.ibkr_client_threadsafe import ReconnectConfig
+        ibkr_client = ThreadSafeIBKRClient(
+            host=ibkr_config.get('host', '127.0.0.1'),
+            port=ibkr_config.get('port', 4001),
+            client_id=ibkr_config.get('client_id_base', 20) + 9,
+            reconnect_config=ReconnectConfig(enabled=False),
+        )
+        if ibkr_client.connect():
+            if verbose:
+                print("\nFetching overnight futures from IBKR...")
+            es_pct, nq_pct, ym_pct = get_futures_snapshot(ibkr_client)
+            overnight = create_overnight_data(es_pct, nq_pct, ym_pct)
+            if verbose:
+                print(f"  ES: {es_pct:+.2f}%, NQ: {nq_pct:+.2f}%, YM: {ym_pct:+.2f}%")
+            ibkr_client.disconnect()
+        else:
+            if verbose:
+                print("\nIBKR not available, using neutral futures data")
+    except Exception as e:
+        if verbose:
+            print(f"\nFutures fetch failed (non-critical): {e}")
 
     # Get prior regime for trend
     prior_score = None
@@ -300,6 +329,36 @@ def run_regime_analysis(config: dict, session, verbose: bool = False):
     score.entry_risk_score = entry_risk_score
     score.entry_risk_level = entry_risk_level
 
+    # Fetch Fear & Greed data
+    fg_data = None
+    try:
+        from regime.fear_greed_client import FearGreedClient
+        fg_client = FearGreedClient.from_config(config)
+        fg_data = fg_client.fetch_current()
+        if fg_data and verbose:
+            print(f"\nFear & Greed: {fg_data.score:.0f} ({fg_data.rating})")
+    except Exception as e:
+        if verbose:
+            print(f"\nF&G fetch failed (non-critical): {e}")
+
+    # Fetch VIX data
+    vix_data = None
+    try:
+        from regime.vix_client import VixClient
+        vix_client = VixClient.from_config(config)
+        vix_data = vix_client.fetch_current()
+        if vix_data and verbose:
+            print(f"VIX: {vix_data.close:.2f} ({vix_data.previous_close:.2f} prev)")
+    except Exception as e:
+        if verbose:
+            print(f"VIX fetch failed (non-critical): {e}")
+
+    # Attach sentiment to score for Discord
+    score.fear_greed_data = fg_data
+    if vix_data:
+        score.vix_close = vix_data.close
+        score.vix_previous_close = vix_data.previous_close
+
     if verbose:
         print(f"\n{'='*50}")
         print("REGIME ANALYSIS RESULTS")
@@ -311,6 +370,10 @@ def run_regime_analysis(config: dict, session, verbose: bool = False):
         if score.prior_regime:
             print(f"  Prior Regime: {score.prior_regime.value}")
             print(f"  Trend: {score.regime_trend}")
+        if fg_data:
+            print(f"  F&G: {fg_data.score:.0f} ({fg_data.rating})")
+        if vix_data:
+            print(f"  VIX: {vix_data.close:.2f}")
         print(f"{'='*50}")
 
     return score, phase_transition, combined_dist
@@ -356,6 +419,11 @@ def send_discord_alert(
             print("Mode: SENDING")
         print(f"Webhook: {webhook_url[:50]}..." if webhook_url else "No webhook")
 
+    # Extract sentiment data from score (attached by run_regime_analysis)
+    fg_data = getattr(score, 'fear_greed_data', None)
+    vix_close = getattr(score, 'vix_close', None)
+    vix_prev = getattr(score, 'vix_previous_close', None)
+
     success = notifier.send_regime_alert(
         score,
         verbose=True,
@@ -363,7 +431,10 @@ def send_discord_alert(
         ibd_status=ibd_status,
         ibd_exposure_min=ibd_min,
         ibd_exposure_max=ibd_max,
-        ibd_updated_at=None
+        ibd_updated_at=None,
+        fear_greed_data=fg_data,
+        vix_close=vix_close,
+        vix_previous_close=vix_prev,
     )
 
     if not dry_run:

@@ -2168,35 +2168,75 @@ class PositionTableView(QDialog):
                 QMessageBox.warning(self, "Error", "Position not found")
                 return
 
-            # Check if transition requires a dialog
+            # Check if transition requires a dialog (has required or optional fields)
             from canslim_monitor.gui.state_config import get_transition
             transition = get_transition(from_state, to_state)
 
-            if transition and transition.requires_dialog:
-                # Import appropriate dialog
-                if to_state == 1:  # Entry
-                    from canslim_monitor.gui.transition_dialogs import EntryDialog
-                    dialog = EntryDialog(position, self)
-                elif to_state == -1:  # Closed
-                    from canslim_monitor.gui.transition_dialogs import ClosePositionDialog
-                    dialog = ClosePositionDialog(position, self)
-                elif to_state == -2:  # Stopped Out
-                    from canslim_monitor.gui.transition_dialogs import StopOutDialog
-                    dialog = StopOutDialog(position, self)
-                else:
-                    dialog = None
+            if transition and (transition.required_fields or transition.optional_fields):
+                # Use TransitionDialog for all transitions needing input
+                from canslim_monitor.gui.transition_dialogs import TransitionDialog
 
-                if dialog:
-                    if dialog.exec() == QDialog.DialogCode.Accepted:
-                        result = dialog.get_result()
-                        # Apply the transition result
-                        for key, value in result.items():
-                            if hasattr(position, key):
-                                setattr(position, key, value)
-                        position.state = to_state
-                        self.db_session.commit()
-                        self._load_data()
-                    return
+                # Prepare current data for dialog
+                current_data = {
+                    'symbol': position.symbol,
+                    'pivot': position.pivot,
+                    'stop_price': position.stop_price,
+                    'avg_cost': position.avg_cost,
+                    'total_shares': position.total_shares,
+                    'last_price': position.last_price,
+                    'e1_shares': position.e1_shares,
+                    'e1_price': position.e1_price,
+                    'e2_shares': position.e2_shares,
+                    'e2_price': position.e2_price,
+                    'e3_shares': position.e3_shares,
+                    'e3_price': position.e3_price,
+                    'entry_date': position.entry_date,
+                    'breakout_date': position.breakout_date,
+                    'watch_date': position.watch_date,
+                    'current_pnl_pct': position.current_pnl_pct,
+                    'notes': position.notes,
+                }
+
+                dialog = TransitionDialog(
+                    symbol=position.symbol,
+                    from_state=from_state,
+                    to_state=to_state,
+                    current_data=current_data,
+                    parent=self
+                )
+
+                if dialog.exec() == QDialog.DialogCode.Accepted:
+                    result = dialog.get_result()
+
+                    # Map exit_* fields to close_* fields for Position model compatibility
+                    if to_state < 0:
+                        if 'exit_price' in result:
+                            result['close_price'] = result['exit_price']
+                        if 'exit_date' in result:
+                            result['close_date'] = result['exit_date']
+                        if 'exit_reason' in result:
+                            result['close_reason'] = result['exit_reason']
+
+                        # Calculate realized P&L
+                        close_price = result.get('close_price') or result.get('exit_price', 0)
+                        avg_cost = position.avg_cost or 0
+                        if close_price and avg_cost > 0:
+                            result['realized_pnl_pct'] = ((close_price - avg_cost) / avg_cost) * 100
+                            total_shares = position.total_shares or 0
+                            if total_shares > 0:
+                                result['realized_pnl'] = (close_price - avg_cost) * total_shares
+
+                    # Apply the transition result
+                    for key, value in result.items():
+                        if hasattr(position, key):
+                            setattr(position, key, value)
+                    position.state = to_state
+                    self.db_session.commit()
+                    self._load_data()
+
+                    # Emit signal so parent window updates
+                    self.position_edited.emit(position_id, result)
+                return
 
             # Simple state change (no dialog required)
             position.state = to_state

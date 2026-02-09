@@ -12,7 +12,7 @@ from threading import Lock, Thread
 import time
 
 try:
-    from ib_insync import IB, Stock, Contract, Ticker, util
+    from ib_insync import IB, Stock, Index, Contract, Ticker, util
     IB_AVAILABLE = True
 except ImportError:
     IB_AVAILABLE = False
@@ -35,6 +35,9 @@ class IBKRClient:
     DEFAULT_PORT = 7497  # TWS paper trading (7496 for live)
     DEFAULT_CLIENT_ID = 10
     
+    # Symbols that need Index contracts (not Stock)
+    INDEX_SYMBOLS = {'VIX': ('VIX', 'CBOE', 'USD')}
+
     # Cache settings
     QUOTE_CACHE_SECONDS = 5
     HISTORICAL_CACHE_SECONDS = 300  # 5 minutes
@@ -158,7 +161,14 @@ class IBKRClient:
             self.on_error(errorCode, errorString)
     
     # ==================== QUOTES ====================
-    
+
+    def _create_contract(self, symbol: str):
+        """Create the appropriate contract type for a symbol."""
+        if symbol.upper() in self.INDEX_SYMBOLS:
+            sym, exchange, currency = self.INDEX_SYMBOLS[symbol.upper()]
+            return Index(sym, exchange, currency)
+        return Stock(symbol, 'SMART', 'USD')
+
     def get_quote(self, symbol: str, use_cache: bool = True) -> Optional[Dict]:
         """
         Get real-time quote for a symbol.
@@ -183,9 +193,9 @@ class IBKRClient:
                     return self._quote_cache[symbol]
         
         try:
-            # Create contract
-            contract = Stock(symbol, 'SMART', 'USD')
-            
+            # Create contract (handles VIX as Index, others as Stock)
+            contract = self._create_contract(symbol)
+
             # Get snapshot
             self._ib.qualifyContracts(contract)
             ticker = self._ib.reqMktData(contract, '', True, False)
@@ -241,9 +251,9 @@ class IBKRClient:
             return True  # Already subscribed
         
         try:
-            contract = Stock(symbol, 'SMART', 'USD')
+            contract = self._create_contract(symbol)
             self._ib.qualifyContracts(contract)
-            
+
             ticker = self._ib.reqMktData(contract, '', False, False)
             self._subscriptions[symbol] = ticker
             
@@ -327,9 +337,9 @@ class IBKRClient:
                     return self._historical_cache[cache_key]
         
         try:
-            contract = Stock(symbol, 'SMART', 'USD')
+            contract = self._create_contract(symbol)
             self._ib.qualifyContracts(contract)
-            
+
             bars = self._ib.reqHistoricalData(
                 contract,
                 endDateTime='',

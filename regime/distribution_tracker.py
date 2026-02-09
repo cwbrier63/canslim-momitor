@@ -27,6 +27,10 @@ Config options (in config.yaml under distribution_days:):
   trend_comparison_days: 5     # Days back for trend calculation
   enable_stalling: false       # Whether to count stalling days (default: false)
   stalling_max_gain: 0.4       # Max % gain for stalling day
+
+  # Volume smoothing (Phase A)
+  min_volume_increase_pct: 2.0   # Min % volume must exceed prior day (filters noise)
+  decline_rounding_decimals: 2   # Round pct_change before threshold comparison
   
   # Symbol configuration
   use_indices: false           # true = SPX/COMP (indices), false = SPY/QQQ (ETFs)
@@ -178,7 +182,7 @@ class DistributionDayTracker:
     """
     
     # IBD standard thresholds
-    DEFAULT_DECLINE_THRESHOLD = -0.2  # % decline to qualify as distribution
+    DEFAULT_DECLINE_THRESHOLD = -0.25  # % decline to qualify as distribution (tuned for MarketSurge parity)
     DEFAULT_LOOKBACK_DAYS = 25        # Trading days window
     DEFAULT_RALLY_EXPIRATION = 5.0    # % rally to expire
     DEFAULT_TREND_DAYS = 5            # Days for trend comparison
@@ -187,6 +191,10 @@ class DistributionDayTracker:
     DEFAULT_STALLING_MAX_GAIN = 0.4   # Max % gain for stalling (up but little progress)
     DEFAULT_STALLING_MIN_GAIN = 0.0   # Must be positive (up day)
     DEFAULT_ENABLE_STALLING = False   # Disabled by default - too aggressive
+
+    # Volume smoothing (Phase A)
+    DEFAULT_MIN_VOLUME_INCREASE_PCT = 9.0   # Min % volume must exceed prior day to count (tuned for MarketSurge parity)
+    DEFAULT_DECLINE_ROUNDING_DECIMALS = 2   # Round pct_change before threshold comparison
     
     # Symbol presets
     SYMBOLS_ETF = {'sp500': 'SPY', 'nasdaq': 'QQQ'}
@@ -204,11 +212,13 @@ class DistributionDayTracker:
         stalling_max_gain: float = None,
         sp500_symbol: str = None,
         nasdaq_symbol: str = None,
-        use_indices: bool = False
+        use_indices: bool = False,
+        min_volume_increase_pct: float = None,
+        decline_rounding_decimals: int = None
     ):
         """
         Initialize tracker.
-        
+
         Args:
             db_session: SQLAlchemy session
             decline_threshold: % decline to qualify as D-day (default: -0.2)
@@ -220,6 +230,8 @@ class DistributionDayTracker:
             sp500_symbol: Symbol for S&P 500 tracking (default: SPY or SPX if use_indices)
             nasdaq_symbol: Symbol for NASDAQ tracking (default: QQQ or COMP if use_indices)
             use_indices: If True, use index symbols (SPX/COMP) instead of ETFs (SPY/QQQ)
+            min_volume_increase_pct: Min % volume must exceed prior day (default: 2.0)
+            decline_rounding_decimals: Decimal places to round pct_change (default: 2)
         """
         self.db = db_session
         self.decline_threshold = decline_threshold if decline_threshold is not None else self.DEFAULT_DECLINE_THRESHOLD
@@ -228,6 +240,8 @@ class DistributionDayTracker:
         self.trend_days = trend_comparison_days if trend_comparison_days is not None else self.DEFAULT_TREND_DAYS
         self.enable_stalling = enable_stalling if enable_stalling is not None else self.DEFAULT_ENABLE_STALLING
         self.stalling_max_gain = stalling_max_gain if stalling_max_gain is not None else self.DEFAULT_STALLING_MAX_GAIN
+        self.min_volume_increase_pct = min_volume_increase_pct if min_volume_increase_pct is not None else self.DEFAULT_MIN_VOLUME_INCREASE_PCT
+        self.decline_rounding_decimals = decline_rounding_decimals if decline_rounding_decimals is not None else self.DEFAULT_DECLINE_ROUNDING_DECIMALS
         
         # Symbol configuration
         default_symbols = self.SYMBOLS_INDEX_IBKR if use_indices else self.SYMBOLS_ETF
@@ -239,7 +253,9 @@ class DistributionDayTracker:
         logger.info(
             f"DistributionDayTracker initialized: "
             f"sp500={self.sp500_symbol}, nasdaq={self.nasdaq_symbol}, "
-            f"use_indices={use_indices}, enable_stalling={self.enable_stalling}"
+            f"use_indices={use_indices}, enable_stalling={self.enable_stalling}, "
+            f"min_vol_inc={self.min_volume_increase_pct}%, "
+            f"rounding={self.decline_rounding_decimals} decimals"
         )
     
     @classmethod
@@ -280,7 +296,9 @@ class DistributionDayTracker:
             stalling_max_gain=dd_config.get('stalling_max_gain'),
             sp500_symbol=dd_config.get('sp500_symbol'),
             nasdaq_symbol=dd_config.get('nasdaq_symbol'),
-            use_indices=use_indices
+            use_indices=use_indices,
+            min_volume_increase_pct=dd_config.get('min_volume_increase_pct'),
+            decline_rounding_decimals=dd_config.get('decline_rounding_decimals')
         )
     
     def is_distribution_day(
@@ -288,35 +306,62 @@ class DistributionDayTracker:
         today_close: float,
         today_volume: int,
         yesterday_close: float,
-        yesterday_volume: int
+        yesterday_volume: int,
+        bar_date: date = None
     ) -> Tuple[bool, float, Optional[DistributionType]]:
         """
         Check if today qualifies as a distribution day (including stalling).
-        
+
+        Uses volume smoothing (min_volume_increase_pct) and price rounding
+        (decline_rounding_decimals) to filter borderline noise and match
+        MarketSurge parity.
+
         Args:
             today_close: Today's closing price
             today_volume: Today's volume
             yesterday_close: Yesterday's closing price
             yesterday_volume: Yesterday's volume
-        
+            bar_date: Date of the bar (for debug logging)
+
         Returns:
             (is_d_day, pct_change, distribution_type)
         """
-        pct_change = (today_close - yesterday_close) / yesterday_close * 100
-        volume_higher = today_volume > yesterday_volume
+        raw_pct_change = (today_close - yesterday_close) / yesterday_close * 100
+        pct_change = round(raw_pct_change, self.decline_rounding_decimals)
+
+        # Volume increase check with smoothing threshold
+        volume_increase_pct = ((today_volume - yesterday_volume) / yesterday_volume) * 100 if yesterday_volume > 0 else 0.0
+        volume_higher = volume_increase_pct >= self.min_volume_increase_pct
         volume_equal_or_higher = today_volume >= yesterday_volume
-        
-        # Standard distribution: Down >= 0.2% on higher volume
+
+        # Standard distribution: Down >= threshold on sufficiently higher volume
         if pct_change <= self.decline_threshold and volume_higher:
+            logger.debug(
+                f"D-DAY DETECTED {bar_date}: close={today_close:.2f}, "
+                f"pct_change={pct_change:+.2f}% (raw={raw_pct_change:+.4f}%), "
+                f"vol={today_volume:,} vs {yesterday_volume:,} (+{volume_increase_pct:.1f}%)"
+            )
             return True, pct_change, DistributionType.DISTRIBUTION
-        
+
         # Stalling: Up day with little progress on high volume (only if enabled)
         if self.enable_stalling:
             is_up_day = pct_change > self.DEFAULT_STALLING_MIN_GAIN
             is_small_gain = pct_change <= self.stalling_max_gain
             if is_up_day and is_small_gain and volume_equal_or_higher:
                 return True, pct_change, DistributionType.STALLING
-        
+
+        # Log near-misses for diagnostics
+        if pct_change <= self.decline_threshold and not volume_higher:
+            logger.debug(
+                f"D-DAY NEAR-MISS (vol) {bar_date}: pct={pct_change:+.2f}%, "
+                f"vol_inc={volume_increase_pct:+.1f}% < min {self.min_volume_increase_pct}%"
+            )
+        elif volume_higher and pct_change > self.decline_threshold and pct_change <= 0:
+            logger.debug(
+                f"D-DAY NEAR-MISS (pct) {bar_date}: pct={pct_change:+.2f}% "
+                f"(raw={raw_pct_change:+.4f}%), threshold={self.decline_threshold}%"
+            )
+
         return False, pct_change, None
     
     def update_distribution_days(
@@ -367,7 +412,8 @@ class DistributionDayTracker:
             # Check if this day qualifies as distribution day
             is_d_day, pct_change, d_type = self.is_distribution_day(
                 today.close, today.volume,
-                yesterday.close, yesterday.volume
+                yesterday.close, yesterday.volume,
+                bar_date=bar_date
             )
             
             if is_d_day:
@@ -752,18 +798,20 @@ class DistributionDayTracker:
     def debug_distribution_days(self, symbol: str) -> str:
         """Generate debug output showing all distribution day details."""
         details = self.get_distribution_day_details(symbol)
-        
+
         lines = [f"\n=== {symbol} Distribution Days Debug ==="]
         lines.append(f"Active Count: {len(details)}")
         lines.append(f"Stalling Detection: {'ENABLED' if self.enable_stalling else 'DISABLED'}")
-        
+        lines.append(f"Volume Smoothing: min_increase={self.min_volume_increase_pct}%")
+        lines.append(f"Decline Rounding: {self.decline_rounding_decimals} decimals")
+
         for d in details:
             d_type = d.get('type', 'DISTRIBUTION')
             lines.append(
                 f"  {d['date']}: {d['pct_change']:+.2f}% "
                 f"({d['days_ago']} days ago) [{d_type}]"
             )
-        
+
         return '\n'.join(lines)
 
 

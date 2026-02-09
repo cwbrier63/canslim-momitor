@@ -129,6 +129,13 @@ class RegimeScore:
     # NEW: Entry Risk (tactical layer - calculated daily)
     entry_risk_score: float = 0.0  # -1.5 to +1.5, positive = favorable
     entry_risk_level: EntryRiskLevel = EntryRiskLevel.MODERATE
+
+    # CNN Fear & Greed Index (display only - not in composite score)
+    fear_greed_data: Optional['FearGreedData'] = None
+
+    # VIX data (display only - not in composite score)
+    vix_close: Optional[float] = None
+    vix_previous_close: Optional[float] = None
     
     def to_dict(self) -> Dict:
         """Convert to dictionary for storage/serialization."""

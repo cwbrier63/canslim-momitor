@@ -1,0 +1,90 @@
+# Learning Engine Configuration
+# ==============================
+
+learning:
+  # Minimum data requirements
+  min_outcomes: 50
+  min_successes: 20
+  min_failures: 20
+  min_months: 3
+
+  # Outcome Classification
+  outcome_thresholds:
+    success_pct: 20.0      # >= 20% gain = SUCCESS
+    partial_min_pct: 5.0   # 5-20% gain = PARTIAL
+    stop_loss_pct: -7.0    # Hit 7-8% stop = STOPPED
+    # Anything else with < 5% gain = FAILED
+
+  # Weight Optimization
+  optimization:
+    algorithm: "ridge"       # ridge, lasso, elastic_net
+    alpha: 1.0              # Regularization strength
+    cv_folds: 5             # Cross-validation folds
+    bootstrap_iterations: 1000
+    multiplier_clamp_min: 0.3   # Min weight multiplier
+    multiplier_clamp_max: 3.0   # Max weight multiplier
+    min_improvement_pct: 5.0    # Require 5%+ accuracy gain
+
+  # Immutable Rules (ML cannot override these)
+  immutable_rules:
+    rs_floor:
+      enabled: true
+      threshold: 70
+      max_grade: "C"
+    # Add more immutable rules here as needed
+
+  # Auto-trigger settings
+  auto_analysis:
+    enabled: true
+    trigger_after_n_outcomes: 10  # Re-analyze after 10 new outcomes
+    min_days_between: 7           # Don't re-analyze more than weekly
+
+  # Performance monitoring
+  monitoring:
+    degradation_threshold: 0.55  # Alert if accuracy drops below 55%
+    rolling_window_days: 90      # Calculate rolling accuracy over 90 days
+
+  # Factors used in learning (must match scoring_config.yaml)
+  factors:
+    - name: "rs_rating"
+      type: "numeric"
+      source_column: "rs_at_entry"
+      range: [0, 100]
+    - name: "stage"
+      type: "categorical"
+      source_column: "stage_at_entry"
+      encoding: "ordinal"  # 1=best, higher=worse
+    - name: "base_depth"
+      type: "numeric"
+      source_column: "base_depth_at_entry"
+      range: [0, 100]
+      invert: true  # Lower depth is better
+    - name: "base_length"
+      type: "numeric"
+      source_column: "base_length_at_entry"
+      range: [1, 52]
+    - name: "pattern"
+      type: "categorical"
+      source_column: "pattern"
+      encoding: "target"   # Encode by success rate
+    - name: "market_regime"
+      type: "categorical"
+      source_column: "market_regime_at_entry"
+      encoding: "ordinal"  # BULLISH=3, NEUTRAL=2, BEARISH=1
+    - name: "eps_rating"
+      type: "numeric"
+      source_column: "eps_at_entry"
+      range: [0, 100]
+    - name: "ad_rating"
+      type: "categorical"
+      source_column: "ad_at_entry"
+      encoding: "ordinal"  # A=5, B=4, C=3, D=2, E=1
+
+  # Backtest data sources
+  backtest:
+    swingtrader_db: "C:/Trading/backtest_training.db"
+    manual_csv: "C:/Trading/manual_validation.csv"
+
+# Discord notification channel for ML results
+discord:
+  ml_channel_webhook: ""  # Set to separate #ml-learning webhook URL

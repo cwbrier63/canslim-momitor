@@ -80,6 +80,17 @@ class PriceUpdateWorker(QObject):
                     logger.debug(f"Polygon returned prices for: {list(polygon_prices.keys())}")
                 prices.update(polygon_prices)
 
+            # VIX fallback - use Yahoo Finance if IBKR didn't return VIX
+            vix_data = prices.get('VIX', {})
+            if not vix_data.get('last'):
+                logger.debug("VIX not available from IBKR, trying Yahoo Finance fallback")
+                vix_prices = self._fetch_vix_fallback()
+                if vix_prices:
+                    prices['VIX'] = vix_prices
+                    logger.debug(f"Yahoo Finance VIX: {vix_prices.get('last')}")
+                else:
+                    logger.warning("VIX data unavailable from both IBKR and Yahoo Finance")
+
             self.finished.emit(prices)
         except Exception as e:
             logger.error(f"Price fetch error: {e}")
@@ -120,19 +131,25 @@ class PriceUpdateWorker(QObject):
             prices = {}
             for symbol in symbols:
                 try:
-                    # Get previous day's close (most reliable for free tier)
-                    aggs = client.get_previous_close_agg(symbol)
-                    if aggs and len(aggs) > 0:
-                        bar = aggs[0]
+                    # Fetch 2 recent daily bars to get both current close and previous close
+                    from datetime import timedelta, date
+                    end_dt = date.today()
+                    start_dt = end_dt - timedelta(days=10)  # 10 days to ensure 2 trading days
+                    bars = client.get_aggs(symbol, 1, 'day', start_dt.isoformat(), end_dt.isoformat(), limit=5)
+                    bars = list(bars) if bars else []
+                    if bars and len(bars) >= 1:
+                        current_bar = bars[-1]
+                        prev_bar_close = bars[-2].close if len(bars) >= 2 else current_bar.open
                         prices[symbol] = {
-                            'last': bar.close,
-                            'close': bar.close,
-                            'open': bar.open,
-                            'high': bar.high,
-                            'low': bar.low,
-                            'volume': bar.volume,
+                            'last': current_bar.close,
+                            'close': prev_bar_close,  # Previous session close for D% calc
+                            'open': current_bar.open,
+                            'high': current_bar.high,
+                            'low': current_bar.low,
+                            'volume': current_bar.volume,
+                            'previousClose': prev_bar_close,
                         }
-                        logger.debug(f"Polygon {symbol}: ${bar.close:.2f}")
+                        logger.debug(f"Polygon {symbol}: ${current_bar.close:.2f} (prev: ${prev_bar_close:.2f})")
                 except Exception as e:
                     logger.debug(f"Polygon fetch error for {symbol}: {e}")
 
@@ -146,6 +163,45 @@ class PriceUpdateWorker(QObject):
         except Exception as e:
             logger.error(f"Polygon fallback failed: {e}")
             return {}
+
+    def _fetch_vix_fallback(self) -> Optional[Dict]:
+        """Fetch VIX data from Yahoo Finance as fallback when IBKR unavailable."""
+        import logging
+        logger = logging.getLogger('canslim.gui')
+
+        try:
+            import requests
+            url = 'https://query2.finance.yahoo.com/v8/finance/chart/%5EVIX'
+            params = {'interval': '1d', 'range': '2d'}
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+                              'AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36'
+            }
+            resp = requests.get(url, params=params, headers=headers, timeout=5)
+            resp.raise_for_status()
+            data = resp.json()
+
+            result = data['chart']['result'][0]
+            meta = result['meta']
+            price = meta.get('regularMarketPrice', 0)
+            prev_close = meta.get('chartPreviousClose') or meta.get('previousClose', 0)
+
+            if price and price > 0:
+                return {
+                    'symbol': 'VIX',
+                    'last': float(price),
+                    'close': float(prev_close) if prev_close else float(price),
+                    'open': float(meta.get('regularMarketOpen', 0) or 0),
+                    'high': float(meta.get('regularMarketDayHigh', 0) or 0),
+                    'low': float(meta.get('regularMarketDayLow', 0) or 0),
+                    'volume': 0,
+                    'timestamp': None,
+                }
+
+        except Exception as e:
+            logger.debug(f"Yahoo Finance VIX fallback failed: {e}")
+
+        return None
 
 
 class MarketRegimeBanner(QFrame):
@@ -266,12 +322,70 @@ class MarketRegimeBanner(QFrame):
         
         futures_section.addLayout(futures_layout)
         layout.addLayout(futures_section)
-        
-        layout.addStretch()
-        
+
         # Separator
         layout.addWidget(self._create_separator())
-        
+
+        # Fear & Greed Section
+        fg_section = QVBoxLayout()
+        fg_section.setSpacing(2)
+
+        fg_title = QLabel("FEAR & GREED")
+        fg_title.setStyleSheet("font-size: 10px; color: #AAA;")
+        fg_section.addWidget(fg_title)
+
+        self.fg_score_label = QLabel("--")
+        fg_font = QFont()
+        fg_font.setBold(True)
+        fg_font.setPointSize(13)
+        self.fg_score_label.setFont(fg_font)
+        self.fg_score_label.setStyleSheet("color: #888;")
+        self.fg_score_label.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.fg_score_label.setToolTip("CNN Fear & Greed Index — Click for chart")
+        self.fg_score_label.mousePressEvent = self._on_fg_click
+        fg_section.addWidget(self.fg_score_label)
+
+        self.fg_rating_label = QLabel("")
+        self.fg_rating_label.setStyleSheet("font-size: 10px; color: #AAA;")
+        fg_section.addWidget(self.fg_rating_label)
+
+        layout.addLayout(fg_section)
+
+        # Separator
+        layout.addWidget(self._create_separator())
+
+        # VIX Section
+        vix_section = QVBoxLayout()
+        vix_section.setSpacing(2)
+
+        vix_title = QLabel("VIX")
+        vix_title.setStyleSheet("font-size: 10px; color: #AAA;")
+        vix_section.addWidget(vix_title)
+
+        self.vix_score_label = QLabel("--")
+        vix_font = QFont()
+        vix_font.setBold(True)
+        vix_font.setPointSize(13)
+        self.vix_score_label.setFont(vix_font)
+        self.vix_score_label.setStyleSheet("color: #888;")
+        self.vix_score_label.setToolTip("CBOE Volatility Index (VIX)")
+        vix_section.addWidget(self.vix_score_label)
+
+        self.vix_rating_label = QLabel("")
+        self.vix_rating_label.setStyleSheet("font-size: 10px; color: #AAA;")
+        vix_section.addWidget(self.vix_rating_label)
+
+        self.vix_change_label = QLabel("")
+        self.vix_change_label.setStyleSheet("font-size: 10px; color: #AAA;")
+        vix_section.addWidget(self.vix_change_label)
+
+        layout.addLayout(vix_section)
+
+        layout.addStretch()
+
+        # Separator
+        layout.addWidget(self._create_separator())
+
         # Exposure Recommendation
         exposure_section = QVBoxLayout()
         exposure_section.setSpacing(2)
@@ -396,7 +510,115 @@ class MarketRegimeBanner(QFrame):
         
         if exposure:
             self.exposure_label.setText(exposure)
-    
+
+    def update_fear_greed(self, score: float = None, rating: str = None):
+        """Update Fear & Greed Index display."""
+        if score is None:
+            self.fg_score_label.setText("--")
+            self.fg_score_label.setStyleSheet("color: #888;")
+            self.fg_rating_label.setText("")
+            return
+
+        self.fg_score_label.setText(f"{score:.1f}")
+        self.fg_rating_label.setText(rating or "")
+
+        # Color by score range (CNN boundaries)
+        if score < 25:
+            color = "#DC3545"      # Red - Extreme Fear
+        elif score < 45:
+            color = "#FD7E14"      # Orange - Fear
+        elif score < 55:
+            color = "#FFC107"      # Yellow - Neutral
+        elif score < 75:
+            color = "#90EE90"      # Light green - Greed
+        else:
+            color = "#28A745"      # Green - Extreme Greed
+
+        self.fg_score_label.setStyleSheet(f"color: {color};")
+        self.fg_rating_label.setStyleSheet(f"font-size: 10px; color: {color};")
+
+    def update_vix(self, price: float = None, prev_close: float = None):
+        """Update VIX card display.
+
+        IBD/MarketSurge-aligned thresholds:
+            0-12:  Extreme Complacency (blue)
+            12-15: Low Volatility (green)
+            15-20: Normal (green)
+            20-25: Elevated (yellow)
+            25-30: High (orange)
+            30-45: Very High (red)
+            45+:   Extreme Fear (dark red)
+        """
+        if price is None:
+            self.vix_score_label.setText("--")
+            self.vix_score_label.setStyleSheet("color: #888;")
+            self.vix_rating_label.setText("")
+            self.vix_change_label.setText("")
+            return
+
+        from canslim_monitor.regime.vix_client import classify_vix
+
+        rating = classify_vix(price)
+
+        # Color by VIX level (7-tier IBD)
+        if price < 12:
+            color = "#5B9BD5"      # Blue - Extreme Complacency
+        elif price < 15:
+            color = "#28A745"      # Green - Low Volatility
+        elif price < 20:
+            color = "#28A745"      # Green - Normal
+        elif price < 25:
+            color = "#FFC107"      # Yellow - Elevated
+        elif price < 30:
+            color = "#FFA500"      # Orange - High
+        elif price < 45:
+            color = "#DC3545"      # Red - Very High
+        else:
+            color = "#8B0000"      # Dark Red - Extreme Fear
+
+        self.vix_score_label.setText(f"{price:.1f}")
+        self.vix_score_label.setStyleSheet(f"color: {color};")
+        self.vix_rating_label.setText(rating)
+        self.vix_rating_label.setStyleSheet(f"font-size: 10px; color: {color};")
+
+        # Intraday change (VIX up = bad = red, VIX down = good = green)
+        if prev_close and prev_close > 0:
+            change = price - prev_close
+            if change > 0:
+                arrow = "\u2191"
+                chg_color = "#DC3545"   # Red - VIX rising is bad
+            elif change < 0:
+                arrow = "\u2193"
+                chg_color = "#28A745"   # Green - VIX falling is good
+            else:
+                arrow = "\u2192"
+                chg_color = "#AAA"
+            self.vix_change_label.setText(f"{arrow} {change:+.1f}")
+            self.vix_change_label.setStyleSheet(f"font-size: 10px; color: {chg_color};")
+        else:
+            self.vix_change_label.setText("")
+
+    def _on_fg_click(self, event):
+        """Handle click on Fear & Greed score to open chart dialog."""
+        try:
+            from canslim_monitor.gui.sentiment_chart_dialog import SentimentChartDialog
+            dialog = SentimentChartDialog(self._get_db_session_factory(), parent=self)
+            dialog.exec()
+        except ImportError:
+            pass
+        except Exception as e:
+            logger = logging.getLogger('canslim.gui')
+            logger.warning(f"Could not open sentiment chart: {e}")
+
+    def _get_db_session_factory(self):
+        """Get database session factory from the parent window."""
+        parent = self.parent()
+        while parent:
+            if hasattr(parent, 'db'):
+                return parent.db.get_new_session
+            parent = parent.parent() if hasattr(parent, 'parent') else None
+        return None
+
     def update_indices(self, spy: float = None, qqq: float = None, dia: float = None, iwm: float = None):
         """Update index prices only (for backward compatibility)."""
         if spy:
@@ -615,14 +837,28 @@ class MarketRegimeDialog(QDialog):
         lines.append(f"{trend_emoji} Trend: {trend}")
         lines.append("")
 
-        # D-Day Histogram
+        # D-Day Histogram (35 calendar days to match Discord format)
         if results.get('spy_dates') or results.get('qqq_dates'):
             lines.append("📅 D-Day Timeline (■=D-day)")
-            spy_histogram = self._build_histogram(results.get('spy_dates', []), results.get('lookback_start'))
-            qqq_histogram = self._build_histogram(results.get('qqq_dates', []), results.get('lookback_start'))
+            spy_histogram = self._build_histogram(results.get('spy_dates', []))
+            qqq_histogram = self._build_histogram(results.get('qqq_dates', []))
             lines.append(f"SPY[{spy_count}]: {spy_histogram}")
             lines.append(f"QQQ[{qqq_count}]: {qqq_histogram}")
             lines.append("        ← 5wk ago          Today →")
+            lines.append("")
+
+        # Overnight Futures (always shown, matching Discord format)
+        overnight = results.get('overnight')
+        if overnight:
+            futures_emoji = {"BULL": "🟢", "BEAR": "🔴", "NEUTRAL": "🟡"}
+            es_e = futures_emoji.get(overnight.es_trend.value if hasattr(overnight.es_trend, 'value') else str(overnight.es_trend), "🟡")
+            nq_e = futures_emoji.get(overnight.nq_trend.value if hasattr(overnight.nq_trend, 'value') else str(overnight.nq_trend), "🟡")
+            ym_e = futures_emoji.get(overnight.ym_trend.value if hasattr(overnight.ym_trend, 'value') else str(overnight.ym_trend), "🟡")
+            lines.append("🌙 OVERNIGHT FUTURES")
+            lines.append(f"┌──────────────┬──────────────┬──────────────┐")
+            lines.append(f"│ ES {overnight.es_change_pct:+.2f}%    │ NQ {overnight.nq_change_pct:+.2f}%    │ YM {overnight.ym_change_pct:+.2f}%    │")
+            lines.append(f"└──────────────┴──────────────┴──────────────┘")
+            lines.append(f"   {es_e} ES  {nq_e} NQ  {ym_e} YM")
             lines.append("")
 
         # Market Phase / FTD
@@ -639,7 +875,11 @@ class MarketRegimeDialog(QDialog):
                 visual = visual[:-1] + '✓' if visual else '✓'
             lines.append(f"   Day {rally_day}: [{visual}]")
         if results.get('has_confirmed_ftd'):
-            lines.append("   ✅ Follow-Through Day Confirmed")
+            ftd_date = results.get('ftd_date')
+            ftd_date_str = f" ({ftd_date.strftime('%b %d, %Y')})" if ftd_date else ""
+            days_ago = results.get('days_since_ftd')
+            days_str = f" — {days_ago} day{'s' if days_ago != 1 else ''} ago" if days_ago else ""
+            lines.append(f"   ✅ Follow-Through Day Confirmed{ftd_date_str}{days_str}")
         lines.append("")
 
         # Entry Risk (if available)
@@ -697,6 +937,28 @@ class MarketRegimeDialog(QDialog):
         lines.append(f"💰 EXPOSURE: {exposure}")
         lines.append("")
 
+        # Sentiment (F&G + VIX)
+        fg_data = results.get('fg_data')
+        vix_data = results.get('vix_data')
+        if fg_data or vix_data:
+            lines.append("━" * 50)
+            lines.append("📊 SENTIMENT")
+            if fg_data:
+                fg_change_str = ""
+                if fg_data.previous_close and fg_data.previous_close > 0:
+                    fg_delta = fg_data.score - fg_data.previous_close
+                    fg_change_str = f" ({fg_delta:+.1f} from yesterday)"
+                lines.append(f"   CNN F&G: {fg_data.score:.1f} — {fg_data.rating}{fg_change_str}")
+            if vix_data:
+                from canslim_monitor.regime.vix_client import classify_vix
+                vix_rating = classify_vix(vix_data.close)
+                vix_change_str = ""
+                if vix_data.previous_close and vix_data.previous_close > 0:
+                    vix_delta = vix_data.close - vix_data.previous_close
+                    vix_change_str = f" ({vix_delta:+.2f} from yesterday)"
+                lines.append(f"   VIX:     {vix_data.close:.2f} — {vix_rating}{vix_change_str}")
+            lines.append("")
+
         # Guidance (compact)
         lines.append("📋 GUIDANCE")
         max_d = max(spy_count, qqq_count)
@@ -721,36 +983,39 @@ class MarketRegimeDialog(QDialog):
 
         self.results_text.setText("\n".join(lines))
 
-    def _build_histogram(self, dates: list, lookback_start=None) -> str:
-        """Build a simple text histogram of distribution days."""
+    def _build_histogram(self, dates: list, lookback_start=None, lookback_days: int = 35) -> str:
+        """Build ASCII histogram of distribution days (matches discord_regime format).
+
+        Uses 35 calendar days to cover all 25 trading days (weekends/holidays).
+        """
         from datetime import date, timedelta
-        
+
+        ref_date = date.today()
+
         if not dates:
-            return "·" * 25
-        
-        today = date.today()
-        if lookback_start is None:
-            lookback_start = today - timedelta(days=25)
-        
-        # Convert string dates to date objects if needed
+            return "·" * lookback_days
+
+        # Convert string dates to date objects
         date_set = set()
         for d in dates:
             if isinstance(d, str):
-                date_set.add(date.fromisoformat(d))
+                try:
+                    date_set.add(date.fromisoformat(d))
+                except ValueError:
+                    pass
+            elif hasattr(d, 'date'):
+                date_set.add(d.date())
             else:
                 date_set.add(d)
-        
-        # Build histogram (25 characters for 25 days)
-        histogram = ""
-        current = lookback_start
-        while current <= today:
-            if current in date_set:
-                histogram += "█"
-            else:
-                histogram += "·"
-            current += timedelta(days=1)
-        
-        return histogram[-25:] if len(histogram) > 25 else histogram.ljust(25, '·')
+
+        # Build day-by-day array (index 0 = oldest, last = today)
+        ddays = [False] * lookback_days
+        for d in date_set:
+            days_ago = (ref_date - d).days
+            if 0 <= days_ago < lookback_days:
+                ddays[lookback_days - 1 - days_ago] = True
+
+        return ''.join(['■' if d else '·' for d in ddays])
     
     def show_error(self, error_msg: str):
         """Show an error message."""
@@ -1121,6 +1386,12 @@ class KanbanMainWindow(QMainWindow):
         weekly_report_action.triggered.connect(self._on_weekly_report)
         reports_menu.addAction(weekly_report_action)
 
+        reports_menu.addSeparator()
+
+        analytics_action = QAction("📊 &Analytics Dashboard...", self)
+        analytics_action.triggered.connect(self._on_analytics_dashboard)
+        reports_menu.addAction(analytics_action)
+
         # Help menu
         help_menu = menubar.addMenu("&Help")
         
@@ -1312,6 +1583,36 @@ class KanbanMainWindow(QMainWindow):
                         self.logger.info(
                             f"Loaded futures: ES:{latest.es_change_pct:+.2f}% "
                             f"NQ:{latest.nq_change_pct:+.2f}% YM:{latest.ym_change_pct:+.2f}%"
+                        )
+
+                    # Update Fear & Greed — use latest alert or fall back to most recent with data
+                    fg_source = latest if (hasattr(latest, 'fear_greed_score') and latest.fear_greed_score is not None) else None
+                    if not fg_source:
+                        fg_source = session.query(MarketRegimeAlert).filter(
+                            MarketRegimeAlert.fear_greed_score.isnot(None)
+                        ).order_by(MarketRegimeAlert.date.desc()).first()
+                    if fg_source and fg_source.fear_greed_score is not None:
+                        self.regime_banner.update_fear_greed(
+                            score=fg_source.fear_greed_score,
+                            rating=fg_source.fear_greed_rating
+                        )
+                        self.logger.info(
+                            f"Loaded F&G: {fg_source.fear_greed_score:.1f} ({fg_source.fear_greed_rating}) from {fg_source.date}"
+                        )
+
+                    # Update VIX — use latest alert or fall back to most recent with data
+                    vix_source = latest if (hasattr(latest, 'vix_close') and latest.vix_close is not None) else None
+                    if not vix_source:
+                        vix_source = session.query(MarketRegimeAlert).filter(
+                            MarketRegimeAlert.vix_close.isnot(None)
+                        ).order_by(MarketRegimeAlert.date.desc()).first()
+                    if vix_source and vix_source.vix_close is not None:
+                        self.regime_banner.update_vix(
+                            price=vix_source.vix_close,
+                            prev_close=vix_source.vix_previous_close
+                        )
+                        self.logger.info(
+                            f"Loaded VIX: {vix_source.vix_close:.2f} (prev: {vix_source.vix_previous_close}) from {vix_source.date}"
                         )
                 else:
                     self.logger.info("No regime data in database yet")
@@ -1851,7 +2152,29 @@ class KanbanMainWindow(QMainWindow):
                 if e1 + e2 + e3 > 0:
                     result['avg_cost'] = (e1 * p1 + e2 * p2 + e3 * p3) / (e1 + e2 + e3)
                 result['py2_done'] = True
-            
+
+            # Map exit_* fields to close_* fields for Position model compatibility
+            # TransitionDialog uses exit_price/date/reason but Position model uses close_*
+            if to_state < 0:
+                if 'exit_price' in result:
+                    result['close_price'] = result['exit_price']
+                if 'exit_date' in result:
+                    result['close_date'] = result['exit_date']
+                if 'exit_reason' in result:
+                    result['close_reason'] = result['exit_reason']
+
+                # Calculate realized P&L
+                close_price = result.get('close_price') or result.get('exit_price', 0)
+                avg_cost = position.avg_cost or 0
+
+                if close_price and avg_cost > 0:
+                    result['realized_pnl_pct'] = ((close_price - avg_cost) / avg_cost) * 100
+
+                    # Calculate dollar P&L based on total shares at exit
+                    total_shares = position.total_shares or 0
+                    if total_shares > 0:
+                        result['realized_pnl'] = (close_price - avg_cost) * total_shares
+
             # Handle closing positions - create Outcome record
             if to_state < 0:
                 self._create_outcome_record(session, position, result, to_state)
@@ -4503,6 +4826,9 @@ class KanbanMainWindow(QMainWindow):
                 decline_threshold=dist_config.get('decline_threshold'),
                 lookback_days=dist_config.get('lookback_days', 25),
                 rally_expiration_pct=dist_config.get('rally_expiration_pct', 5.0),
+                min_volume_increase_pct=dist_config.get('min_volume_increase_pct'),
+                decline_rounding_decimals=dist_config.get('decline_rounding_decimals'),
+                enable_stalling=dist_config.get('enable_stalling'),
                 use_indices=use_indices
             )
             combined = dist_tracker.get_combined_data(spy_bars, qqq_bars)
@@ -4595,7 +4921,62 @@ class KanbanMainWindow(QMainWindow):
                 qqq_dates=combined.qqq_dates
             )
 
-            overnight = create_overnight_data(0.0, 0.0, 0.0)  # No IBKR data in GUI
+            # Fetch overnight futures from IBKR (same as regime_thread)
+            overnight = create_overnight_data(0.0, 0.0, 0.0)
+            if hasattr(self, 'ibkr_client') and self.ibkr_client:
+                try:
+                    if self.ibkr_client.is_connected():
+                        dialog.set_progress(78, "Fetching overnight futures...")
+                        QApplication.processEvents()
+                        from canslim_monitor.regime.ibkr_futures import get_futures_snapshot
+                        es_pct, nq_pct, ym_pct = get_futures_snapshot(self.ibkr_client)
+                        overnight = create_overnight_data(es_pct, nq_pct, ym_pct)
+                        self.logger.info(f"Overnight futures: ES={es_pct:+.2f}%, NQ={nq_pct:+.2f}%, YM={ym_pct:+.2f}%")
+                except Exception as e:
+                    self.logger.warning(f"Futures fetch failed (non-critical): {e}")
+
+            # Fetch Fear & Greed data (same as regime_thread)
+            dialog.set_progress(82, "Fetching Fear & Greed data...")
+            QApplication.processEvents()
+            fg_data = None
+            try:
+                from canslim_monitor.regime.fear_greed_client import FearGreedClient
+                fg_client = FearGreedClient.from_config(config)
+                fg_data = fg_client.fetch_current()
+                if fg_data:
+                    self.logger.info(f"F&G: {fg_data.score:.0f} ({fg_data.rating})")
+            except Exception as e:
+                self.logger.warning(f"F&G fetch failed (non-critical): {e}")
+
+            # Fetch VIX data (same as regime_thread)
+            dialog.set_progress(84, "Fetching VIX data...")
+            QApplication.processEvents()
+            vix_data = None
+            try:
+                from canslim_monitor.regime.vix_client import VixClient
+                vix_client = VixClient.from_config(config)
+                vix_data = vix_client.fetch_current()
+                if vix_data:
+                    self.logger.info(f"VIX: {vix_data.close:.2f} (prev: {vix_data.previous_close:.2f})")
+            except Exception as e:
+                self.logger.warning(f"VIX fetch failed (non-critical): {e}")
+
+            # DB fallback for VIX if live fetch failed
+            if not vix_data:
+                try:
+                    from canslim_monitor.regime.vix_client import VixData
+                    latest_alert = regime_session.query(MarketRegimeAlert).filter(
+                        MarketRegimeAlert.vix_close.isnot(None)
+                    ).order_by(MarketRegimeAlert.date.desc()).first()
+                    if latest_alert and latest_alert.vix_close:
+                        vix_data = VixData(
+                            close=latest_alert.vix_close,
+                            previous_close=latest_alert.vix_previous_close or 0.0,
+                            timestamp=datetime.combine(latest_alert.date, datetime.min.time())
+                        )
+                        self.logger.info(f"VIX from DB fallback: {vix_data.close:.2f} (date: {latest_alert.date})")
+                except Exception as e:
+                    self.logger.debug(f"VIX DB fallback failed: {e}")
 
             # Load prior score for trend tracking (same as CLI)
             prior_score = None
@@ -4639,6 +5020,12 @@ class KanbanMainWindow(QMainWindow):
             )
             score.entry_risk_score = entry_risk_score_val
             score.entry_risk_level = entry_risk_level_val
+
+            # Attach sentiment data to score (same as regime_thread)
+            score.fear_greed_data = fg_data
+            if vix_data:
+                score.vix_close = vix_data.close
+                score.vix_previous_close = vix_data.previous_close
 
             self.logger.info(f"Regime calculated: {score.regime.value}, score: {score.composite_score:+.2f}")
             self.logger.info(f"Entry risk: {entry_risk_level_val.value} ({entry_risk_score_val:+.2f})")
@@ -4729,6 +5116,8 @@ class KanbanMainWindow(QMainWindow):
                             'in_rally_attempt': ftd_data.in_rally_attempt,
                             'rally_day': ftd_data.rally_day,
                             'has_confirmed_ftd': ftd_data.has_confirmed_ftd,
+                            'ftd_date': ftd_data.spy_ftd_date or ftd_data.qqq_ftd_date,
+                            'days_since_ftd': ftd_data.days_since_ftd,
                             'composite_score': score.composite_score,
                             'regime': score.regime.value if hasattr(score.regime, 'value') else str(score.regime),
                             'exposure': f"{min_exp}-{max_exp}%",
@@ -4739,6 +5128,9 @@ class KanbanMainWindow(QMainWindow):
                             'entry_risk_level': _entry_risk_level,
                             'entry_risk_score': _entry_risk_score,
                             'ibd_status': _ibd_status,
+                            'fg_data': fg_data,
+                            'vix_data': vix_data,
+                            'overnight': overnight,
                             'not_saved': True,  # Flag to indicate this wasn't saved
                         }
 
@@ -4752,39 +5144,73 @@ class KanbanMainWindow(QMainWindow):
                     # User confirmed - proceed with update
                     self.logger.info("User confirmed overwrite of existing record")
 
-                    # Update existing record
-                    existing.spy_d_count = combined.spy_count
-                    existing.qqq_d_count = combined.qqq_count
-                    existing.spy_5day_delta = combined.spy_5day_delta
-                    existing.qqq_5day_delta = combined.qqq_5day_delta
-                    existing.d_day_trend = combined.trend
-                    existing.spy_d_dates = ','.join(d.isoformat() for d in combined.spy_dates)
-                    existing.qqq_d_dates = ','.join(d.isoformat() for d in combined.qqq_dates)
-                    existing.market_phase = ftd_status.phase.value
-                    existing.in_rally_attempt = ftd_data.in_rally_attempt
-                    existing.rally_day = ftd_data.rally_day
-                    existing.has_confirmed_ftd = ftd_data.has_confirmed_ftd
-                    existing.composite_score = score.composite_score
-                    existing.regime = score.regime
+                # Build full alert with ALL fields (same as regime_thread._save_regime_alert)
+                spy_dates_str = ','.join(d.isoformat() for d in combined.spy_dates)
+                qqq_dates_str = ','.join(d.isoformat() for d in combined.qqq_dates)
+
+                alert = MarketRegimeAlert(
+                    date=today,
+                    spy_d_count=combined.spy_count,
+                    qqq_d_count=combined.qqq_count,
+                    spy_5day_delta=combined.spy_5day_delta,
+                    qqq_5day_delta=combined.qqq_5day_delta,
+                    d_day_trend=combined.trend,
+                    spy_d_dates=spy_dates_str,
+                    qqq_d_dates=qqq_dates_str,
+                    es_change_pct=overnight.es_change_pct,
+                    nq_change_pct=overnight.nq_change_pct,
+                    ym_change_pct=overnight.ym_change_pct,
+                    spy_d_score=score.component_scores.get('spy_distribution'),
+                    qqq_d_score=score.component_scores.get('qqq_distribution'),
+                    trend_score=score.component_scores.get('distribution_trend'),
+                    es_score=score.component_scores.get('overnight_es'),
+                    nq_score=score.component_scores.get('overnight_nq'),
+                    ym_score=score.component_scores.get('overnight_ym'),
+                    ftd_adjustment=score.component_scores.get('ftd_adjustment'),
+                    market_phase=ftd_status.phase.value,
+                    composite_score=score.composite_score,
+                    regime=score.regime,
+                    prior_regime=score.prior_regime,
+                    prior_score=score.prior_score,
+                    regime_changed=(score.prior_regime != score.regime if score.prior_regime else False),
+                )
+
+                # FTD data
+                alert.in_rally_attempt = ftd_data.in_rally_attempt
+                alert.rally_day = ftd_data.rally_day
+                alert.has_confirmed_ftd = ftd_data.has_confirmed_ftd
+                alert.ftd_date = ftd_data.spy_ftd_date or ftd_data.qqq_ftd_date
+                alert.days_since_ftd = ftd_data.days_since_ftd
+
+                # Entry risk
+                alert.entry_risk_score = score.entry_risk_score
+                alert.entry_risk_level = score.entry_risk_level
+
+                # CNN Fear & Greed data
+                if fg_data:
+                    alert.fear_greed_score = fg_data.score
+                    alert.fear_greed_rating = fg_data.rating
+                    alert.fear_greed_previous = fg_data.previous_close
+                    alert.fear_greed_timestamp = fg_data.timestamp
+
+                # VIX data
+                if vix_data:
+                    alert.vix_close = vix_data.close
+                    alert.vix_previous_close = vix_data.previous_close
+
+                if existing:
+                    # Update existing record (same pattern as regime_thread)
+                    preserve_fields = {
+                        'fear_greed_score', 'fear_greed_rating', 'fear_greed_previous',
+                        'fear_greed_timestamp', 'vix_close', 'vix_previous_close',
+                    }
+                    for key, value in alert.__dict__.items():
+                        if not key.startswith('_') and key != 'id':
+                            if key in preserve_fields and value is None:
+                                continue  # Don't overwrite existing data with None
+                            setattr(existing, key, value)
                     self.logger.info(f"Updated existing regime record for {today}")
                 else:
-                    # Create new record
-                    alert = MarketRegimeAlert(
-                        date=today,
-                        spy_d_count=combined.spy_count,
-                        qqq_d_count=combined.qqq_count,
-                        spy_5day_delta=combined.spy_5day_delta,
-                        qqq_5day_delta=combined.qqq_5day_delta,
-                        d_day_trend=combined.trend,
-                        spy_d_dates=','.join(d.isoformat() for d in combined.spy_dates),
-                        qqq_d_dates=','.join(d.isoformat() for d in combined.qqq_dates),
-                        market_phase=ftd_status.phase.value,
-                        in_rally_attempt=ftd_data.in_rally_attempt,
-                        rally_day=ftd_data.rally_day,
-                        has_confirmed_ftd=ftd_data.has_confirmed_ftd,
-                        composite_score=score.composite_score,
-                        regime=score.regime,
-                    )
                     main_session.add(alert)
                     self.logger.info(f"Created new regime record for {today}")
                 
@@ -4799,7 +5225,13 @@ class KanbanMainWindow(QMainWindow):
             
             # Refresh banner from database (single source of truth)
             self._load_market_regime()
-            
+
+            # Update banner F&G + VIX directly (freshly fetched data)
+            if fg_data:
+                self.regime_banner.update_fear_greed(score=fg_data.score, rating=fg_data.rating)
+            if vix_data:
+                self.regime_banner.update_vix(price=vix_data.close, prev_close=vix_data.previous_close)
+
             # Calculate comprehensive index stats (price, day%, week%, SMAs)
             spy_stats = self._calculate_index_stats(spy_bars)
             qqq_stats = self._calculate_index_stats(qqq_bars)
@@ -4908,6 +5340,8 @@ class KanbanMainWindow(QMainWindow):
                 'in_rally_attempt': ftd_data.in_rally_attempt,
                 'rally_day': ftd_data.rally_day,
                 'has_confirmed_ftd': ftd_data.has_confirmed_ftd,
+                'ftd_date': ftd_data.spy_ftd_date or ftd_data.qqq_ftd_date,
+                'days_since_ftd': ftd_data.days_since_ftd,
                 'composite_score': score.composite_score,
                 'regime': score.regime.value if hasattr(score.regime, 'value') else str(score.regime),
                 'exposure': f"{min_exp}-{max_exp}%",
@@ -4919,6 +5353,9 @@ class KanbanMainWindow(QMainWindow):
                 'entry_risk_level': entry_risk_level,
                 'entry_risk_score': entry_risk_score,
                 'ibd_status': ibd_status,
+                'fg_data': fg_data,
+                'vix_data': vix_data,
+                'overnight': overnight,
             }
             
             self.logger.info(f"Results built: {results['regime']}, SPY={results['spy_count']}, QQQ={results['qqq_count']}")
@@ -5329,8 +5766,8 @@ class KanbanMainWindow(QMainWindow):
             positions = repos.positions.get_all(include_closed=False)
             symbols = list(set(pos.symbol for pos in positions))
             
-            # Always include index ETFs for the banner
-            for idx in ['SPY', 'QQQ', 'DIA', 'IWM']:
+            # Always include index ETFs + VIX for the banner
+            for idx in ['SPY', 'QQQ', 'DIA', 'IWM', 'VIX']:
                 if idx not in symbols:
                     symbols.append(idx)
         finally:
@@ -5489,6 +5926,16 @@ class KanbanMainWindow(QMainWindow):
                 sma50=cached.get('sma50'),
                 sma200=cached.get('sma200')
             )
+
+        # Update VIX card
+        vix_data = prices.get('VIX', {})
+        vix_price = vix_data.get('last') or vix_data.get('close')
+        if vix_price and vix_price > 0:
+            vix_prev = vix_data.get('close') or vix_data.get('previousClose')
+            self.logger.debug(f"VIX update: price={vix_price}, prev={vix_prev}")
+            self.regime_banner.update_vix(price=vix_price, prev_close=vix_prev)
+        else:
+            self.logger.debug(f"VIX data missing or invalid: {vix_data}")
 
     def _update_futures(self):
         """Fetch live futures data from IBKR and update banner."""
@@ -5702,6 +6149,18 @@ class KanbanMainWindow(QMainWindow):
         except Exception as e:
             QMessageBox.critical(self, "Report Error", f"Error opening report dialog: {str(e)}")
             self.logger.error(f"Report dialog error: {e}", exc_info=True)
+
+    def _on_analytics_dashboard(self):
+        """Open the analytics dashboard."""
+        from canslim_monitor.gui.analytics import AnalyticsDashboard
+
+        try:
+            # Keep reference to prevent garbage collection
+            self.analytics_dashboard = AnalyticsDashboard(self.db, parent=self)
+            self.analytics_dashboard.show()
+        except Exception as e:
+            QMessageBox.critical(self, "Analytics Error", f"Error opening analytics dashboard: {str(e)}")
+            self.logger.error(f"Analytics dashboard error: {e}", exc_info=True)
 
     def _on_about(self):
         """Show about dialog."""

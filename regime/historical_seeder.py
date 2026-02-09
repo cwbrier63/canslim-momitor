@@ -107,6 +107,9 @@ class HistoricalSeeder:
                 decline_threshold=dist_config.get('decline_threshold'),
                 lookback_days=dist_config.get('lookback_days', 25),
                 rally_expiration_pct=dist_config.get('rally_expiration_pct', 5.0),
+                min_volume_increase_pct=dist_config.get('min_volume_increase_pct'),
+                decline_rounding_decimals=dist_config.get('decline_rounding_decimals'),
+                enable_stalling=dist_config.get('enable_stalling'),
                 use_indices=self.use_indices
             )
 
@@ -171,7 +174,8 @@ class HistoricalSeeder:
         data = fetch_spy_qqq_daily(
             lookback_days=total_days,
             config=api_config,
-            use_indices=self.use_indices
+            use_indices=self.use_indices,
+            end_date=end_date
         )
 
         return data
@@ -322,6 +326,9 @@ class HistoricalSeeder:
                 combined_dist = dist_tracker.get_combined_data(
                     spy_bars, qqq_bars, current_date=current_date
                 )
+
+                # Track new D-days created
+                result.d_days_created += combined_dist.total_new_d_days
 
                 # Check FTD status
                 ftd_status = ftd_tracker.get_market_phase_status(

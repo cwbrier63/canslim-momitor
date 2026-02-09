@@ -1788,10 +1788,15 @@ class EditPositionDialog(QDialog):
         total_shares = e1_shares + e2_shares + e3_shares
         total_cost = (e1_shares * e1_price) + (e2_shares * e2_price) + (e3_shares * e3_price)
 
-        if total_shares <= 0 or total_cost <= 0:
-            return None, None
-
-        avg_cost = total_cost / total_shares
+        # Calculate avg_cost from entries, or fall back to stored position data
+        if total_shares > 0 and total_cost > 0:
+            avg_cost = total_cost / total_shares
+        else:
+            # Entries are empty - use stored avg_cost and total_shares from position data
+            avg_cost = self.position_data.get('avg_cost', 0)
+            total_shares = self.position_data.get('total_shares', 0)
+            if not avg_cost or avg_cost <= 0:
+                return None, None
 
         # Calculate shares remaining after partial takes
         shares_after_tp = total_shares - tp1_sold - tp2_sold

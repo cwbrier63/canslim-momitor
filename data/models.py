@@ -488,12 +488,15 @@ class Outcome(Base):
     tradesviz_matched = Column(Boolean, default=False)
     tradesviz_trade_id = Column(String(50))
     validation_notes = Column(Text)
-    
+
+    # Source tracking
+    source = Column(String(20), default='live')  # 'live', 'swingtrader', 'manual', 'backtest'
+
     created_at = Column(DateTime, default=func.now())
-    
+
     # Relationships
     position = relationship("Position", back_populates="outcome")
-    
+
     def __repr__(self):
         return f"<Outcome(symbol='{self.symbol}', outcome='{self.outcome}', gross_pct={self.gross_pct})>"
 
@@ -504,42 +507,49 @@ class LearnedWeights(Base):
     Supports A/B testing with is_active flag.
     """
     __tablename__ = 'learned_weights'
-    
+
     id = Column(Integer, primary_key=True, autoincrement=True)
     created_at = Column(DateTime, default=func.now(), index=True)
-    
+
+    # Versioning (for tracking weight evolution)
+    version = Column(Integer, default=1)
+    parent_weights_id = Column(Integer, ForeignKey('learned_weights.id'))
+
     # Training Period
     sample_size = Column(Integer)
     training_start = Column(Date)
     training_end = Column(Date)
-    
+
     # Factor Weights (JSON)
     weights = Column(Text)  # {"rs_rating": 0.25, "stage": -0.20, ...}
-    
+
     # Individual Factor Analysis (JSON)
     factor_analysis = Column(Text)  # Per-factor correlation and success rates
-    
+
     # Performance Metrics
     accuracy = Column(Float)
     precision_score = Column(Float)
     recall_score = Column(Float)
     f1_score = Column(Float)
-    
+
     # Comparison to Baseline
     baseline_accuracy = Column(Float)
     improvement_pct = Column(Float)
-    
+
     # Confidence
     confidence_level = Column(Float)  # Based on sample size
-    
+
     # Status
     is_active = Column(Boolean, default=False, index=True)
     activated_at = Column(DateTime)
     deactivated_at = Column(DateTime)
-    
+
+    # A/B Test Association
+    ab_test_id = Column(Integer)
+
     # Notes
     notes = Column(Text)
-    
+
     def __repr__(self):
         return f"<LearnedWeights(id={self.id}, accuracy={self.accuracy}, active={self.is_active})>"
 
@@ -658,6 +668,132 @@ class Config(Base):
             return json.loads(self.value)
         else:
             return self.value
+
+
+class ABTest(Base):
+    """
+    A/B test configuration for comparing weight sets.
+    """
+    __tablename__ = 'ab_tests'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String(100), nullable=False)
+    description = Column(Text)
+
+    # Test configuration
+    control_weights_id = Column(Integer, ForeignKey('learned_weights.id'))
+    treatment_weights_id = Column(Integer, ForeignKey('learned_weights.id'))
+    split_ratio = Column(Float, default=0.5)
+
+    # Status
+    status = Column(String(20), default='draft', index=True)  # draft, running, completed, cancelled
+    started_at = Column(DateTime)
+    ended_at = Column(DateTime)
+
+    # Sample tracking
+    min_sample_size = Column(Integer, default=30)
+    control_count = Column(Integer, default=0)
+    treatment_count = Column(Integer, default=0)
+
+    # Results
+    control_win_rate = Column(Float)
+    treatment_win_rate = Column(Float)
+    control_avg_return = Column(Float)
+    treatment_avg_return = Column(Float)
+    p_value = Column(Float)
+    is_significant = Column(Boolean, default=False)
+
+    # Winner selection
+    winner = Column(String(20))
+    winner_selected_at = Column(DateTime)
+
+    created_at = Column(DateTime, default=func.now())
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
+
+    def __repr__(self):
+        return f"<ABTest(id={self.id}, name='{self.name}', status='{self.status}')>"
+
+
+class ABTestAssignment(Base):
+    """
+    Position assignment to A/B test group.
+    """
+    __tablename__ = 'ab_test_assignments'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    ab_test_id = Column(Integer, ForeignKey('ab_tests.id', ondelete='CASCADE'), nullable=False)
+    position_id = Column(Integer, ForeignKey('positions.id', ondelete='CASCADE'), nullable=False)
+
+    # Assignment
+    group_name = Column(String(20), nullable=False)  # 'control' or 'treatment'
+    weights_id = Column(Integer, ForeignKey('learned_weights.id'), nullable=False)
+    assigned_at = Column(DateTime, default=func.now())
+
+    # Score at assignment
+    score_at_assignment = Column(Integer)
+    grade_at_assignment = Column(String(2))
+
+    # Outcome (updated when position closes)
+    outcome = Column(String(20))
+    return_pct = Column(Float)
+    holding_days = Column(Integer)
+    outcome_recorded_at = Column(DateTime)
+
+    __table_args__ = (
+        Index('idx_ab_assignments_test', 'ab_test_id', 'group_name'),
+        Index('idx_ab_assignments_position', 'position_id'),
+    )
+
+    def __repr__(self):
+        return f"<ABTestAssignment(id={self.id}, test={self.ab_test_id}, group='{self.group_name}')>"
+
+
+class FactorCorrelation(Base):
+    """
+    Stores factor correlation analysis results.
+    """
+    __tablename__ = 'factor_correlations'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    analysis_date = Column(Date, nullable=False, index=True)
+
+    # Analysis period
+    sample_start_date = Column(Date)
+    sample_end_date = Column(Date)
+    sample_size = Column(Integer)
+
+    # Factor being analyzed
+    factor_name = Column(String(50), nullable=False, index=True)
+    factor_type = Column(String(20))
+
+    # Correlation metrics
+    correlation_return = Column(Float)
+    correlation_win_rate = Column(Float)
+    p_value_return = Column(Float)
+    p_value_win_rate = Column(Float)
+
+    # Success rate by bucket
+    low_bucket_win_rate = Column(Float)
+    mid_bucket_win_rate = Column(Float)
+    high_bucket_win_rate = Column(Float)
+
+    # Averages
+    low_bucket_avg_return = Column(Float)
+    mid_bucket_avg_return = Column(Float)
+    high_bucket_avg_return = Column(Float)
+
+    # Statistical significance
+    is_significant = Column(Boolean, default=False)
+    recommended_direction = Column(String(10))  # 'higher', 'lower', 'none'
+
+    created_at = Column(DateTime, default=func.now())
+
+    __table_args__ = (
+        Index('idx_factor_correlations_date', 'analysis_date', 'factor_name'),
+    )
+
+    def __repr__(self):
+        return f"<FactorCorrelation(factor='{self.factor_name}', r={self.correlation_return})>"
 
 
 # Default configuration entries

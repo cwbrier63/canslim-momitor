@@ -128,6 +128,11 @@ class StopChecker(BaseChecker):
     
     def _check_trailing_stop(self, context: PositionContext) -> AlertData:
         """Check if trailing stop triggered."""
+        # Trailing stops only apply to State 4+ (TP1_HIT and beyond)
+        # States 1-3 are still building position, use hard stop only
+        if context.state < 4:
+            return None
+
         # Check if trailing stop should be active
         if context.max_gain_pct < self.trailing_activation_pct:
             return None
