@@ -2226,6 +2226,15 @@ class PositionTableView(QDialog):
                             if total_shares > 0:
                                 result['realized_pnl'] = (close_price - avg_cost) * total_shares
 
+                    # Auto-set entry dates for transaction tracking
+                    if to_state == 1 and 'e1_shares' in result:
+                        result.setdefault('e1_date', datetime.now().date())
+                        result.setdefault('entry_date', datetime.now().date())
+                    elif to_state == 2 and 'e2_shares' in result:
+                        result.setdefault('e2_date', datetime.now().date())
+                    elif to_state == 3 and 'e3_shares' in result:
+                        result.setdefault('e3_date', datetime.now().date())
+
                     # Apply the transition result
                     for key, value in result.items():
                         if hasattr(position, key):

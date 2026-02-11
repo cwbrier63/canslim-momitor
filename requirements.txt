@@ -33,6 +33,11 @@ google-api-python-client>=2.100.0
 google-auth-httplib2>=0.1.0
 google-auth-oauthlib>=1.1.0
 
+# TradingView-style charts (optional)
+# lightweight-charts>=2.0
+# PyQt6-WebEngine>=6.5.0
+# pandas>=2.0.0
+
 # Interactive Brokers
 ib_insync>=0.9.86
 

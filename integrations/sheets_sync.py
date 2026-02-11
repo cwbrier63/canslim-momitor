@@ -111,14 +111,22 @@ class SheetsSync:
         'stop_price': 'AM',
         'tp1_target': 'AN',
         'tp2_target': 'AO',
+
+        # Column AP-AU: Transaction Dates (V3.7 TrendSpider Markers)
+        'e1_date': 'AP',
+        'e2_date': 'AQ',
+        'e3_date': 'AR',
+        'tp1_date': 'AS',
+        'tp2_date': 'AT',
+        'close_date': 'AU',
     }
 
     # Sheet header row (1-indexed)
     HEADER_ROW = 1
     # First data row
     DATA_START_ROW = 2
-    # Last column in sheet (AO = column 41)
-    LAST_COLUMN = 'AO'
+    # Last column in sheet (AU = column 47)
+    LAST_COLUMN = 'AU'
 
     def __init__(
         self,
@@ -388,13 +396,13 @@ class SheetsSync:
     def _position_to_row(self, position: Position) -> List[Any]:
         """
         Convert Position model to row data for sheet.
-        Outputs values in V36 column order (A through AO).
+        Outputs values in V37 column order (A through AU).
 
         Args:
             position: Position instance
 
         Returns:
-            List of cell values in column order A-AO
+            List of cell values in column order A-AU
         """
         def fmt(value, field_type='str'):
             """Format value for sheet."""
@@ -412,7 +420,7 @@ class SheetsSync:
                 return int(value) if value else ''
             return str(value) if value else ''
 
-        # Build row in exact column order A-AO
+        # Build row in exact column order A-AU
         row = [
             # A-K: Core Position Data
             fmt(position.portfolio),                    # A: Portfolio
@@ -472,6 +480,14 @@ class SheetsSync:
             fmt(position.stop_price, 'float'),          # AM: Stop_Price
             fmt(getattr(position, 'tp1_target', None), 'float'),  # AN: TP1_Target
             fmt(getattr(position, 'tp2_target', None), 'float'),  # AO: TP2_Target
+
+            # AP-AU: Transaction Dates (V3.7 TrendSpider Markers)
+            fmt(position.e1_date, 'date'),              # AP: E1_Date
+            fmt(position.e2_date, 'date'),              # AQ: E2_Date
+            fmt(position.e3_date, 'date'),              # AR: E3_Date
+            fmt(position.tp1_date, 'date'),              # AS: TP1_Date
+            fmt(position.tp2_date, 'date'),              # AT: TP2_Date
+            fmt(position.close_date, 'date'),           # AU: Close_Date
         ]
 
         return row
@@ -492,7 +508,7 @@ class SheetsSync:
         # Prepare batch request
         data = []
         for row_num, row_data, position in updates:
-            # Range covers all columns A through AO
+            # Range covers all columns A through AU
             range_name = f"{self.sheet_name}!A{row_num}:{self.LAST_COLUMN}{row_num}"
 
             data.append({

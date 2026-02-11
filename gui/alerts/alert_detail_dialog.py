@@ -60,50 +60,56 @@ class AlertDetailDialog(QDialog):
         self._populate_data()
     
     def _enrich_alert_data(self):
-        """Fetch missing data from position if available."""
-        # Check if key fields are missing
-        needs_enrichment = (
-            self.alert.get('grade') is None and 
-            self.alert.get('pivot_at_alert') is None and
-            self.alert.get('pnl_pct_at_alert') is None
-        )
-        
-        if not needs_enrichment:
-            return
-        
+        """Fetch missing data from position if available.
+
+        avg_volume is never stored in the Alert table, so it always
+        needs to be fetched from the position. Other fields are only
+        fetched when the alert record itself is missing them.
+        """
         position_id = self.alert.get('position_id')
         if not position_id:
             return
-        
+
+        # Determine what needs enrichment
+        needs_avg_volume = self.alert.get('avg_volume') is None
+        needs_other = (
+            self.alert.get('grade') is None or
+            self.alert.get('pivot_at_alert') is None or
+            self.alert.get('pnl_pct_at_alert') is None
+        )
+
+        if not needs_avg_volume and not needs_other:
+            return
+
         # Try to get db_session_factory from alert_service if not provided
         session_factory = self.db_session_factory
         if not session_factory and self.alert_service:
             session_factory = getattr(self.alert_service, 'db_session_factory', None)
-        
+
         if not session_factory:
             return
-        
+
         try:
             from canslim_monitor.data.repository import RepositoryManager
-            
+
             session = session_factory()
             try:
                 repos = RepositoryManager(session)
                 position = repos.positions.get_by_id(position_id)
-                
+
                 if position:
-                    # Fill in missing data from position
+                    # avg_volume is never on Alert — always fetch from position
+                    if needs_avg_volume:
+                        self.alert['avg_volume'] = position.avg_volume_50d
+
+                    # Fill in other missing fields from position
                     if self.alert.get('grade') is None:
-                        self.alert['grade'] = position.canslim_grade
+                        self.alert['grade'] = position.entry_grade
                     if self.alert.get('score') is None:
                         self.alert['score'] = position.entry_score
                     if self.alert.get('pivot_at_alert') is None:
                         self.alert['pivot_at_alert'] = position.pivot
-                    if self.alert.get('ma50') is None:
-                        self.alert['ma50'] = position.ma_50
-                    if self.alert.get('ma21') is None:
-                        self.alert['ma21'] = position.ma_21
-                    
+
                     # Calculate P&L if we have entry price (use e1_price or avg_cost)
                     entry_price = position.e1_price or position.avg_cost
                     if self.alert.get('pnl_pct_at_alert') is None and entry_price:
@@ -111,10 +117,10 @@ class AlertDetailDialog(QDialog):
                         if alert_price:
                             pnl = ((alert_price - entry_price) / entry_price) * 100
                             self.alert['pnl_pct_at_alert'] = pnl
-                    
+
             finally:
                 session.close()
-                
+
         except Exception as e:
             print(f"Error enriching alert data: {e}")
     
@@ -222,6 +228,7 @@ class AlertDetailDialog(QDialog):
             ('pnl', 'P&L'),
             ('pivot', 'Pivot'),
             ('volume_ratio', 'Vol Ratio'),
+            ('avg_vol', 'Avg Vol'),
             ('ma_50', '50 MA'),
             ('ma_21', '21 EMA'),
             ('grade', 'Grade'),
@@ -416,11 +423,12 @@ class AlertDetailDialog(QDialog):
         self._set_info('pnl', self._format_pnl(alert.get('pnl_pct_at_alert')))
         self._set_info('pivot', self._format_price(alert.get('pivot_at_alert')))
         self._set_info('volume_ratio', self._format_volume(alert.get('volume_ratio')))
+        self._set_info('avg_vol', self._format_avg_volume(alert.get('avg_volume')))
         self._set_info('ma_50', self._format_price(alert.get('ma50')))
         self._set_info('ma_21', self._format_price(alert.get('ma21')))
-        self._set_info('grade', alert.get('grade', '-'))
-        self._set_info('score', str(alert.get('score') if alert.get('score') else '-'))
-        self._set_info('market', alert.get('market_regime', '-'))
+        self._set_info('grade', alert.get('grade') or '-')
+        self._set_info('score', str(alert.get('score')) if alert.get('score') is not None else '-')
+        self._set_info('market', alert.get('market_regime') or '-')
         
         # Education content
         desc = get_description_text(alert_type, subtype)
@@ -476,10 +484,20 @@ class AlertDetailDialog(QDialog):
         return '-'
     
     def _format_volume(self, ratio) -> str:
-        """Format volume ratio."""
-        if ratio:
+        """Format volume ratio (RVOL)."""
+        if ratio is not None and ratio > 0:
             return f"{ratio:.2f}x"
         return '-'
+
+    def _format_avg_volume(self, volume) -> str:
+        """Format average daily volume with K/M suffixes."""
+        if not volume or volume <= 0:
+            return '-'
+        if volume >= 1_000_000:
+            return f"{volume / 1_000_000:.1f}M"
+        elif volume >= 1_000:
+            return f"{volume / 1_000:.0f}K"
+        return str(int(volume))
     
     def _format_pnl(self, pnl) -> str:
         """Format P&L percentage."""

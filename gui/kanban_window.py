@@ -38,6 +38,12 @@ _polygon_cache_time: float = 0
 _POLYGON_CACHE_TTL = 60  # seconds
 
 
+class IBKRConnectionBridge(QObject):
+    """Bridge between IBKR background thread and GUI thread via Qt signals."""
+    connected = pyqtSignal()
+    disconnected = pyqtSignal()
+
+
 class PriceUpdateWorker(QObject):
     """
     Worker that fetches prices from IBKR in a background thread.
@@ -46,6 +52,7 @@ class PriceUpdateWorker(QObject):
     """
     finished = pyqtSignal(dict)  # Emits {symbol: price_data}
     error = pyqtSignal(str)
+    ibkr_disconnected = pyqtSignal()  # Emitted when IBKR is not connected
 
     INDEX_ETFS = ['SPY', 'QQQ', 'DIA', 'IWM']
 
@@ -55,6 +62,9 @@ class PriceUpdateWorker(QObject):
         self.symbols = symbols
         self.polygon_api_key = polygon_api_key
 
+    # Max Polygon API calls per cycle (Stocks Starter: 5 calls/min)
+    MAX_POLYGON_CALLS = 4  # Reserve 1 for overhead
+
     def run(self):
         """Fetch prices from IBKR with Polygon fallback for indices."""
         import logging
@@ -62,23 +72,38 @@ class PriceUpdateWorker(QObject):
 
         try:
             prices = {}
+            ibkr_was_connected = False
 
             # Try IBKR first
             if self.ibkr_client:
-                connected = self.ibkr_client.is_connected()
-                logger.debug(f"IBKR connected: {connected}, fetching {len(self.symbols)} symbols")
-                if connected:
+                ibkr_was_connected = self.ibkr_client.is_connected()
+                logger.debug(f"IBKR connected: {ibkr_was_connected}, fetching {len(self.symbols)} symbols")
+                if ibkr_was_connected:
                     prices = self.ibkr_client.get_quotes(self.symbols) or {}
                     logger.debug(f"IBKR returned prices for: {list(prices.keys())}")
+                else:
+                    logger.warning("IBKR not connected during price fetch")
+                    self.ibkr_disconnected.emit()
 
-            # Check if we're missing index ETFs - use Polygon fallback
-            missing_indices = [s for s in self.INDEX_ETFS if s not in prices or not prices.get(s, {}).get('last')]
-            if missing_indices:
-                logger.debug(f"Missing index prices, using Polygon fallback for: {missing_indices}")
-                polygon_prices = self._fetch_from_polygon(missing_indices)
-                if polygon_prices:
-                    logger.debug(f"Polygon returned prices for: {list(polygon_prices.keys())}")
-                prices.update(polygon_prices)
+            # Find ALL symbols missing prices (not just index ETFs)
+            missing_symbols = [s for s in self.symbols
+                               if s not in prices or not prices.get(s, {}).get('last')]
+
+            if missing_symbols and self.polygon_api_key:
+                # Prioritize: index ETFs first, then position symbols
+                priority = [s for s in self.INDEX_ETFS if s in missing_symbols]
+                others = [s for s in missing_symbols if s not in self.INDEX_ETFS and s != 'VIX']
+                fetch_list = priority + others
+
+                # Cap at MAX_POLYGON_CALLS to respect rate limits
+                fetch_list = fetch_list[:self.MAX_POLYGON_CALLS]
+
+                if fetch_list:
+                    logger.debug(f"Polygon fallback for {len(fetch_list)} symbols: {fetch_list}")
+                    polygon_prices = self._fetch_from_polygon(fetch_list)
+                    if polygon_prices:
+                        logger.debug(f"Polygon returned prices for: {list(polygon_prices.keys())}")
+                    prices.update(polygon_prices)
 
             # VIX fallback - use Yahoo Finance if IBKR didn't return VIX
             vix_data = prices.get('VIX', {})
@@ -129,10 +154,14 @@ class PriceUpdateWorker(QObject):
             client = RESTClient(api_key=api_key)
 
             prices = {}
-            for symbol in symbols:
+            from datetime import timedelta, date
+            for i, symbol in enumerate(symbols):
                 try:
+                    # Rate-limit: small delay between calls (Stocks Starter = 5 calls/min)
+                    if i > 0:
+                        time.sleep(0.5)
+
                     # Fetch 2 recent daily bars to get both current close and previous close
-                    from datetime import timedelta, date
                     end_dt = date.today()
                     start_dt = end_dt - timedelta(days=10)  # 10 days to ensure 2 trading days
                     bars = client.get_aggs(symbol, 1, 'day', start_dt.isoformat(), end_dt.isoformat(), limit=5)
@@ -1153,6 +1182,8 @@ class KanbanMainWindow(QMainWindow):
         # IBKR client (lazy initialized)
         self.ibkr_client = None
         self.ibkr_connected = False
+        self.ibkr_bridge = None  # Qt signal bridge for IBKR thread -> GUI thread
+        self._last_price_update_time = None  # Track when prices were last successfully updated
         
         # Price update worker thread
         self.price_worker = None
@@ -1391,6 +1422,22 @@ class KanbanMainWindow(QMainWindow):
         analytics_action = QAction("📊 &Analytics Dashboard...", self)
         analytics_action.triggered.connect(self._on_analytics_dashboard)
         reports_menu.addAction(analytics_action)
+
+        reports_menu.addSeparator()
+
+        tv_chart_action = QAction("📈 &TradingView Market Chart...", self)
+        tv_chart_action.setShortcut("Ctrl+T")
+        try:
+            from canslim_monitor.gui.tradingview_chart_dialog import LIGHTWEIGHT_CHARTS_AVAILABLE
+            if not LIGHTWEIGHT_CHARTS_AVAILABLE:
+                tv_chart_action.setEnabled(False)
+                tv_chart_action.setToolTip("Install: pip install lightweight-charts PyQt6-WebEngine pandas")
+        except Exception as e:
+            print(f"[TradingView] Import failed: {type(e).__name__}: {e}")
+            tv_chart_action.setEnabled(False)
+            tv_chart_action.setToolTip("Install: pip install lightweight-charts PyQt6-WebEngine pandas")
+        tv_chart_action.triggered.connect(self._on_tradingview_chart)
+        reports_menu.addAction(tv_chart_action)
 
         # Help menu
         help_menu = menubar.addMenu("&Help")
@@ -2130,7 +2177,8 @@ class KanbanMainWindow(QMainWindow):
                 result['total_shares'] = result['e1_shares']
                 result['avg_cost'] = result.get('e1_price')
                 result['entry_date'] = result.get('entry_date', datetime.now().date())
-            
+                result['e1_date'] = result.get('entry_date', datetime.now().date())
+
             elif to_state == 2 and 'e2_shares' in result:
                 e1 = position.e1_shares or 0
                 e2 = result['e2_shares']
@@ -2140,7 +2188,8 @@ class KanbanMainWindow(QMainWindow):
                 if e1 + e2 > 0:
                     result['avg_cost'] = (e1 * p1 + e2 * p2) / (e1 + e2)
                 result['py1_done'] = True
-            
+                result['e2_date'] = datetime.now().date()
+
             elif to_state == 3 and 'e3_shares' in result:
                 e1 = position.e1_shares or 0
                 e2 = position.e2_shares or 0
@@ -2152,6 +2201,7 @@ class KanbanMainWindow(QMainWindow):
                 if e1 + e2 + e3 > 0:
                     result['avg_cost'] = (e1 * p1 + e2 * p2 + e3 * p3) / (e1 + e2 + e3)
                 result['py2_done'] = True
+                result['e3_date'] = datetime.now().date()
 
             # Map exit_* fields to close_* fields for Position model compatibility
             # TransitionDialog uses exit_price/date/reason but Position model uses close_*
@@ -2912,13 +2962,7 @@ class KanbanMainWindow(QMainWindow):
         from canslim_monitor.core.position_monitor.breakout_checker_tool import BreakoutCheckerTool
         from canslim_monitor.services.technical_data_service import TechnicalDataService
 
-        # Get volume data from position attributes
-        volume = getattr(position, 'last_volume', 0) or 0
-        avg_volume = getattr(position, 'avg_volume_50d', 0) or 500000
-        high = getattr(position, 'last_high', current_price) or current_price
-        low = getattr(position, 'last_low', current_price) or current_price
-
-        # Fetch technical data (MAs) for alt entry checks
+        # Fetch technical data (MAs, volume) from Polygon
         technical_data = {}
         polygon_api_key = (
             self.config.get('polygon', {}).get('api_key') or
@@ -2939,6 +2983,34 @@ class KanbanMainWindow(QMainWindow):
                 )
             except Exception as e:
                 self.logger.warning(f"Could not fetch technical data for alt entry: {e}")
+
+        # Get avg volume: prefer technical_data (Polygon), fall back to position attributes
+        avg_volume = (
+            technical_data.get('avg_volume_50d') or
+            getattr(position, 'avg_volume_50d', 0) or
+            500000
+        )
+        # Fetch today's intraday volume from Polygon for RVOL calculation
+        volume = 0
+        high = current_price
+        low = current_price
+        if polygon_api_key:
+            try:
+                from canslim_monitor.integrations.polygon_client import PolygonClient
+                pclient = PolygonClient(api_key=polygon_api_key, logger=self.logger)
+                intraday = pclient.get_intraday_volume(position.symbol)
+                if intraday:
+                    volume = intraday.get('cumulative_volume', 0)
+                    if intraday.get('high', 0) > 0:
+                        high = intraday['high']
+                    if intraday.get('low', 0) > 0 and intraday.get('low') != float('inf'):
+                        low = intraday['low']
+                    self.logger.debug(
+                        f"{position.symbol}: Intraday vol={volume:,}, "
+                        f"H=${high:.2f}, L=${low:.2f}"
+                    )
+            except Exception as e:
+                self.logger.debug(f"Could not fetch intraday volume: {e}")
 
         # Create breakout checker tool (also includes WatchlistAltEntryChecker)
         checker_tool = BreakoutCheckerTool(
@@ -4577,10 +4649,39 @@ class KanbanMainWindow(QMainWindow):
             
             # Create client if needed
             if self.ibkr_client is None:
+                # Set up Qt signal bridge for thread-safe GUI updates
+                self.ibkr_bridge = IBKRConnectionBridge()
+                self.ibkr_bridge.connected.connect(self._on_ibkr_reconnected)
+                self.ibkr_bridge.disconnected.connect(self._on_ibkr_disconnected)
+
+                # Use the ibkr logger so health check/reconnect messages go to ibkr log
+                try:
+                    from canslim_monitor.utils.logging import get_logger
+                    client_logger = get_logger('ibkr')
+                except Exception:
+                    client_logger = None
+
+                # Load reconnect config from user config
+                from canslim_monitor.integrations.ibkr_client_threadsafe import ReconnectConfig
+                reconnect_settings = ibkr_config.get('reconnect', {})
+                reconnect_config = ReconnectConfig(
+                    enabled=reconnect_settings.get('enabled', True),
+                    initial_delay=reconnect_settings.get('initial_delay', 30.0),
+                    max_delay=reconnect_settings.get('max_delay', 300.0),
+                    backoff_factor=reconnect_settings.get('backoff_factor', 1.5),
+                    max_attempts=reconnect_settings.get('max_attempts', 0),
+                    health_check_interval=reconnect_settings.get('health_check_interval', 30.0),
+                    gateway_restart_delay=reconnect_settings.get('gateway_restart_delay', 180.0),
+                )
+
                 self.ibkr_client = ThreadSafeIBKRClient(
                     host=host,
                     port=port,
-                    client_id=client_id
+                    client_id=client_id,
+                    logger=client_logger,
+                    reconnect_config=reconnect_config,
+                    on_connect=lambda: self.ibkr_bridge.connected.emit(),
+                    on_disconnect=lambda: self.ibkr_bridge.disconnected.emit(),
                 )
             
             # Connect
@@ -4675,6 +4776,32 @@ class KanbanMainWindow(QMainWindow):
         self.service_panel.set_running(False)
         self.status_bar.showMessage("Service stopped")
     
+    def _on_ibkr_reconnected(self):
+        """Handle IBKR auto-reconnection (called via Qt signal from IBKR thread)."""
+        self.logger.info("IBKR reconnected via auto-reconnect")
+        self.ibkr_connected = True
+        self.service_panel.set_running(True, "IBKR connected")
+        self.status_bar.showMessage(f"IBKR reconnected at {datetime.now().strftime('%H:%M:%S')} - updating prices...")
+
+        # Restart timers if they were stopped
+        if not self.price_timer.isActive():
+            self.price_timer.start(self.price_update_interval)
+        if not self.futures_timer.isActive():
+            self.futures_timer.start(self.futures_update_interval)
+
+        # Trigger immediate price update
+        self._update_prices()
+        self._update_futures()
+
+    def _on_ibkr_disconnected(self):
+        """Handle IBKR disconnection detected (called via Qt signal from IBKR thread)."""
+        self.logger.warning("IBKR disconnected - auto-reconnect in progress")
+        self.status_bar.showMessage("IBKR disconnected - auto-reconnecting...")
+        self.service_panel.set_running(True, "Reconnecting...")
+        # Don't set ibkr_connected=False or stop timers yet -
+        # auto-reconnect will fire _on_ibkr_reconnected when it succeeds.
+        # Meanwhile, price timer cycles will fall back to Polygon.
+
     def _on_run_market_regime(self):
         """Run market regime analysis, save to database, and show results in dialog."""
         self.logger.info("=" * 50)
@@ -5739,8 +5866,9 @@ class KanbanMainWindow(QMainWindow):
         # This handler is for any additional actions needed when service state changes
     
     def _update_prices(self):
-        """Start background price update from IBKR."""
-        if not self.ibkr_connected or not self.ibkr_client:
+        """Start background price update from IBKR (with Polygon fallback)."""
+        if not self.ibkr_client:
+            self.status_bar.showMessage("Price refresh skipped - IBKR not initialized (use Service > Start IBKR)")
             return
         
         # Skip if update already in progress
@@ -5790,6 +5918,7 @@ class KanbanMainWindow(QMainWindow):
         self.price_thread.started.connect(self.price_worker.run)
         self.price_worker.finished.connect(self._on_prices_received)
         self.price_worker.error.connect(self._on_price_error)
+        self.price_worker.ibkr_disconnected.connect(self._on_ibkr_disconnected)
         self.price_worker.finished.connect(self.price_thread.quit)
         self.price_worker.error.connect(self.price_thread.quit)
         self.price_thread.finished.connect(self._on_price_thread_finished)
@@ -5833,7 +5962,19 @@ class KanbanMainWindow(QMainWindow):
             # Update market regime banner with index prices
             self._update_market_banner(prices)
 
-            self.status_bar.showMessage(f"Updated {updated_count} prices at {datetime.now().strftime('%H:%M:%S')}")
+            now = datetime.now()
+            time_str = now.strftime('%H:%M:%S')
+            if updated_count > 0:
+                self._last_price_update_time = now
+                source = "IBKR" if self.ibkr_connected else "Polygon"
+                self.status_bar.showMessage(f"Updated {updated_count} prices via {source} at {time_str}")
+            else:
+                stale_msg = ""
+                if self._last_price_update_time:
+                    mins_stale = int((now - self._last_price_update_time).total_seconds() / 60)
+                    if mins_stale > 5:
+                        stale_msg = f" (last update {mins_stale}m ago)"
+                self.status_bar.showMessage(f"No prices updated at {time_str}{stale_msg}")
 
         except Exception as e:
             self.logger.error(f"Error processing prices: {e}")
@@ -5939,7 +6080,7 @@ class KanbanMainWindow(QMainWindow):
 
     def _update_futures(self):
         """Fetch live futures data from IBKR and update banner."""
-        if not self.ibkr_connected or not self.ibkr_client:
+        if not self.ibkr_client or not self.ibkr_client.is_connected():
             return
 
         try:
@@ -6162,6 +6303,25 @@ class KanbanMainWindow(QMainWindow):
             QMessageBox.critical(self, "Analytics Error", f"Error opening analytics dashboard: {str(e)}")
             self.logger.error(f"Analytics dashboard error: {e}", exc_info=True)
 
+    def _on_tradingview_chart(self):
+        """Open TradingView-style market chart."""
+        try:
+            from canslim_monitor.gui.tradingview_chart_dialog import TradingViewChartDialog
+            self._tv_chart_dialog = TradingViewChartDialog(
+                db_session_factory=self.db.get_new_session, parent=self
+            )
+            self._tv_chart_dialog.show()
+        except ImportError:
+            QMessageBox.information(
+                self, "Missing Dependencies",
+                "TradingView charts require additional packages.\n\n"
+                "Install with:\n"
+                "  pip install lightweight-charts PyQt6-WebEngine pandas"
+            )
+        except Exception as e:
+            QMessageBox.critical(self, "Chart Error", f"Error opening TradingView chart: {str(e)}")
+            self.logger.error(f"TradingView chart error: {e}", exc_info=True)
+
     def _on_about(self):
         """Show about dialog."""
         QMessageBox.about(
@@ -6179,7 +6339,7 @@ class KanbanMainWindow(QMainWindow):
         self.logger.info("Closing window...")
         
         # Stop service if running
-        if self.ibkr_connected:
+        if self.ibkr_connected or self.ibkr_client:
             self._on_stop_service()
         
         # Clean up database
@@ -6293,6 +6453,12 @@ def launch_gui(db_path: str):
     db.initialize()
     logger.info("Database initialized")
     
+    # Pre-import QtWebEngineWidgets before QApplication (Qt requirement)
+    try:
+        from PyQt6.QtWebEngineWidgets import QWebEngineView  # noqa: F401
+    except ImportError:
+        pass
+
     # Create and run application
     app = QApplication(sys.argv)
     app.setStyle('Fusion')

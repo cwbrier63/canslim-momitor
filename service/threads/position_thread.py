@@ -15,7 +15,7 @@ from datetime import datetime
 from .base_thread import BaseThread
 from canslim_monitor.core.position_monitor import PositionMonitor
 from canslim_monitor.services.alert_service import (
-    AlertService, AlertType, AlertSubtype, AlertContext
+    AlertService, AlertType, AlertSubtype, AlertContext, AlertData
 )
 from canslim_monitor.services.technical_data_service import TechnicalDataService
 from canslim_monitor.utils.config import get_config
@@ -80,6 +80,7 @@ class PositionThread(BaseThread):
             cooldown_minutes=cooldown_minutes,
             enable_cooldown=cooldown_enabled,
             enable_suppression=alert_config.get('enable_suppression', True),
+            alert_routing=alert_config.get('alert_routing', {}),
             logger=logging.getLogger('canslim.alerts'),
         )
         
@@ -365,28 +366,67 @@ class PositionThread(BaseThread):
     
     def _route_alerts(self, alerts: List):
         """Route alerts through AlertService with proper type mapping."""
-        # Note: alerts are already AlertData objects from PositionMonitor
-        # with full AlertContext populated by the checkers.
-        # We just need to route them through AlertService for 
-        # cooldown filtering, market suppression, and Discord delivery.
-        
         for alert in alerts:
             try:
-                # The alert already has a full context from the checker
-                # Just pass it through to AlertService
+                # Persist 8-week hold state if this alert activates it
+                if alert.subtype == AlertSubtype.EIGHT_WEEK_HOLD:
+                    self._persist_eight_week_hold(alert)
+
+                # Route through AlertService for cooldown, suppression, Discord
                 self.alert_service.create_alert(
                     symbol=alert.symbol,
                     alert_type=alert.alert_type,
                     subtype=alert.subtype,
-                    context=alert.context,  # Use the full context from checker
+                    context=alert.context,
                     position_id=alert.position_id,
                     message=alert.message,
                     action=alert.action,
-                    thread_source=alert.thread_source or f"position_thread",
+                    thread_source=alert.thread_source or "position_thread",
                 )
-                
+
             except Exception as e:
                 self.logger.error(f"Failed to route alert: {e}")
+
+    def _persist_eight_week_hold(self, alert: AlertData):
+        """
+        Persist 8-week hold activation to the database.
+
+        Position objects are detached from SQLAlchemy by the time alerts fire,
+        so we open a fresh session here to write the hold state.
+        """
+        metadata = getattr(alert, '_eight_week_metadata', None)
+        if not metadata or not alert.position_id:
+            return
+
+        if not self.db_session_factory:
+            self.logger.warning("No DB session factory - cannot persist 8-week hold")
+            return
+
+        try:
+            session = self.db_session_factory()
+            try:
+                from canslim_monitor.data.models import Position
+                position = session.query(Position).get(alert.position_id)
+                if position:
+                    position.eight_week_hold_active = True
+                    position.eight_week_hold_start = metadata['hold_start']
+                    position.eight_week_hold_end = metadata['hold_end']
+                    position.eight_week_power_move_pct = metadata['power_move_pct']
+                    position.eight_week_power_move_weeks = metadata['power_move_weeks']
+                    session.commit()
+                    self.logger.info(
+                        f"8-week hold persisted for {alert.symbol} "
+                        f"(+{metadata['power_move_pct']:.1f}% in {metadata['power_move_weeks']:.1f}w, "
+                        f"hold until {metadata['hold_end']})"
+                    )
+                else:
+                    self.logger.warning(
+                        f"Position {alert.position_id} not found for 8-week hold persist"
+                    )
+            finally:
+                session.close()
+        except Exception as e:
+            self.logger.error(f"Error persisting 8-week hold for {alert.symbol}: {e}")
     
     def _update_position_tracking(
         self,

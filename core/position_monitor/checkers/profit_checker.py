@@ -7,8 +7,8 @@ Alerts:
 - 8_WEEK_HOLD: Suppress TP1 for big winners
 """
 
-from typing import List, Dict, Any
-from datetime import datetime, timedelta
+from typing import List, Dict, Any, Optional
+from datetime import datetime, date, timedelta
 import logging
 
 from canslim_monitor.data.models import Position
@@ -57,12 +57,16 @@ class ProfitChecker(BaseChecker):
             return []
         
         alerts = []
-        
+
         # Check 8-week hold activation first
         eight_week_alert = self._check_eight_week_activation(position, context)
         if eight_week_alert:
             alerts.append(eight_week_alert)
-        
+            # Update context in-memory so TP1 check sees the activation
+            # (context is a dataclass; Position is detached and persisted separately)
+            context.eight_week_hold_active = True
+            context.eight_week_hold_end_date = getattr(eight_week_alert, '_hold_end_date', None)
+
         # Check if TP1 is suppressed by 8-week hold
         tp1_suppressed = self._is_tp1_suppressed(context)
         
@@ -83,7 +87,7 @@ class ProfitChecker(BaseChecker):
         self,
         position: Position,
         context: PositionContext,
-    ) -> AlertData:
+    ) -> Optional[AlertData]:
         """Check if 8-week hold rule should activate."""
         # Already active
         if context.eight_week_hold_active:
@@ -100,6 +104,11 @@ class ProfitChecker(BaseChecker):
         if context.days_since_breakout > self.eight_week_trigger_window:
             return None
 
+        # Calculate hold dates
+        hold_start = date.today()
+        hold_end = hold_start + timedelta(weeks=self.eight_week_hold_weeks)
+        power_move_weeks = context.days_since_breakout / 7.0
+
         # Build compact embed format
         message = build_eight_week_hold_embed(
             symbol=context.symbol,
@@ -111,18 +120,30 @@ class ProfitChecker(BaseChecker):
             ma_21=context.ma_21,
             ma_50=context.ma_50,
             market_regime=context.market_regime,
+            hold_until=hold_end,
         )
 
         self.set_cooldown(context.symbol, AlertSubtype.EIGHT_WEEK_HOLD)
 
-        return self.create_alert(
+        alert = self.create_alert(
             context=context,
             alert_type=AlertType.PROFIT,
             subtype=AlertSubtype.EIGHT_WEEK_HOLD,
             message=message,
-            action="HOLD - 8-Week Rule Active",
+            action=f"HOLD - 8-Week Rule Active until {hold_end.strftime('%m/%d')}",
             priority="P2",
         )
+
+        # Attach metadata for downstream persistence (position_thread will read this)
+        alert._hold_end_date = hold_end
+        alert._eight_week_metadata = {
+            'hold_start': hold_start,
+            'hold_end': hold_end,
+            'power_move_pct': round(context.pnl_pct, 2),
+            'power_move_weeks': round(power_move_weeks, 1),
+        }
+
+        return alert
     
     def _is_tp1_suppressed(self, context: PositionContext) -> bool:
         """Check if TP1 is suppressed by 8-week hold."""

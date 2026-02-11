@@ -137,6 +137,11 @@ class BreakoutThread(BaseThread):
         self.volume_threshold_approaching = self.config.get(
             'volume_threshold_approaching', 0.0
         )
+
+        # EXTENDED: Default 0 to catch all extended stocks regardless of volume
+        self.volume_threshold_extended = self.config.get(
+            'volume_threshold_extended', 0.0
+        )
         
         # Legacy support: if old thresholds are set, use them
         if 'volume_threshold_minimum' in self.config:
@@ -445,6 +450,10 @@ class BreakoutThread(BaseThread):
             self.volume_threshold_approaching <= 0 or  # 0 = no requirement
             volume_ratio >= self.volume_threshold_approaching
         )
+        has_extended_volume = (
+            self.volume_threshold_extended <= 0 or  # 0 = no requirement
+            volume_ratio >= self.volume_threshold_extended
+        )
         
         # Market regime check for suppression
         market_in_correction = self._is_market_in_correction()
@@ -476,9 +485,9 @@ class BreakoutThread(BaseThread):
                 pivot_analysis=pivot_analysis
             )
         
-        # EXTENDED: beyond buy zone (alert regardless of volume)
+        # EXTENDED: beyond buy zone, must meet extended volume threshold
         # Filter by max_extended_pct to reduce noise from stocks too far extended
-        elif is_extended:
+        elif is_extended and has_extended_volume:
             if distance_pct <= self.max_extended_pct:
                 alert_generated = self._create_breakout_alert(
                     pos, price_data, distance_pct, volume_ratio,
@@ -645,8 +654,8 @@ class BreakoutThread(BaseThread):
             current_price=current_price,
             pivot_price=pivot,
             volume_ratio=volume_ratio,
-            grade=scoring_result.grade if scoring_result else "",
-            score=scoring_result.final_score if scoring_result else 0,
+            grade=scoring_result.grade if scoring_result else (pos.entry_grade or ""),
+            score=scoring_result.final_score if scoring_result else (pos.entry_score or 0),
             static_score=scoring_result.static_score if scoring_result else 0,
             dynamic_score=scoring_result.dynamic_score if scoring_result else 0,
             market_regime=market_regime,
@@ -1266,6 +1275,7 @@ class BreakoutThread(BaseThread):
             'volume_threshold_confirmed': self.volume_threshold_confirmed,
             'volume_threshold_buy_zone': self.volume_threshold_buy_zone,
             'volume_threshold_approaching': self.volume_threshold_approaching,
+            'volume_threshold_extended': self.volume_threshold_extended,
             'buy_zone_max_pct': self.buy_zone_max_pct,
             'market_regime': self._market_regime_cache,
             'suppress_in_correction': self.suppress_in_correction,

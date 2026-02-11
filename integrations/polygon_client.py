@@ -188,7 +188,14 @@ class PolygonClient:
         # Return only the requested number of days (most recent)
         if len(bars) > days:
             bars = bars[-days:]
-        
+
+        # Clean erroneous data (bad ticks, extreme wicks, negative prices)
+        try:
+            from canslim_monitor.utils.data_cleaner import clean_daily_bars
+            bars = clean_daily_bars(bars)
+        except Exception:
+            pass  # Don't block data fetch if cleaner fails
+
         self.logger.debug(f"Fetched {len(bars)} bars for {symbol}")
         return bars
     

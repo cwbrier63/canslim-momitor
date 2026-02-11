@@ -235,17 +235,19 @@ class AlertService:
         cooldown_minutes: int = 60,
         enable_cooldown: bool = False,
         enable_suppression: bool = True,
+        alert_routing: Dict[str, Any] = None,
         logger: Optional[logging.Logger] = None
     ):
         """
         Initialize alert service.
-        
+
         Args:
             db_session_factory: SQLAlchemy session factory
             discord_notifier: Discord notifier instance
             cooldown_minutes: Minutes between same alert for same symbol
             enable_cooldown: Enable cooldown filtering (False = all alerts pass through)
             enable_suppression: Enable market-based suppression
+            alert_routing: Per-subtype routing overrides (discord on/off, log level)
             logger: Logger instance
         """
         self.db_session_factory = db_session_factory
@@ -254,10 +256,49 @@ class AlertService:
         self.enable_cooldown = enable_cooldown
         self.enable_suppression = enable_suppression
         self.logger = logger or logging.getLogger('canslim.alerts')
-        
+
         # In-memory cooldown cache: {(symbol, type, subtype): last_alert_time}
         self._cooldown_cache: Dict[Tuple[str, str, str], datetime] = {}
+
+        # Alert routing overrides (per-subtype Discord + log level control)
+        self.load_routing(alert_routing or {})
     
+    def load_routing(self, alert_routing: Dict[str, Any]):
+        """Load or reload alert routing configuration."""
+        self._routing_defaults = alert_routing.get('defaults', {
+            'discord': True,
+            'log_level': 'INFO'
+        })
+        self._routing_overrides = alert_routing.get('overrides', {})
+        if self._routing_overrides:
+            suppressed = [k for k, v in self._routing_overrides.items() if not v.get('discord', True)]
+            if suppressed:
+                self.logger.info(f"Alert routing: Discord disabled for {', '.join(suppressed)}")
+
+    def _get_routing(self, subtype_str: str) -> Dict[str, Any]:
+        """Get routing config for an alert subtype."""
+        override = self._routing_overrides.get(subtype_str, {})
+        return {
+            'discord': override.get('discord', self._routing_defaults.get('discord', True)),
+            'log_level': override.get('log_level', self._routing_defaults.get('log_level', 'INFO')),
+        }
+
+    def _should_send_discord(self, subtype_str: str) -> bool:
+        """Check if Discord is enabled for this alert subtype."""
+        return self._get_routing(subtype_str).get('discord', True)
+
+    def _log_alert(self, subtype_str: str, message: str):
+        """Log an alert at the configured level for its subtype."""
+        level = self._get_routing(subtype_str).get('log_level', 'INFO').upper()
+        if level == 'NONE':
+            return
+        elif level == 'DEBUG':
+            self.logger.debug(message)
+        elif level == 'WARNING':
+            self.logger.warning(message)
+        else:  # INFO (default)
+            self.logger.info(message)
+
     def create_alert(
         self,
         symbol: str,
@@ -336,12 +377,18 @@ class AlertService:
         # even if they get converted to SUPPRESSED
         self._update_cooldown(symbol, alert_type, original_subtype)
         
-        # Persist to database
+        # Persist to database (always, regardless of routing)
         self._persist_alert(alert_data)
-        
-        # Send to Discord
-        self._send_discord(alert_data)
-        
+
+        # Check routing config before Discord
+        subtype_str = alert_data.subtype.value if hasattr(alert_data.subtype, 'value') else str(alert_data.subtype)
+
+        if self._should_send_discord(subtype_str):
+            self._send_discord(alert_data)
+            self._log_alert(subtype_str, f"[DISCORD] {alert_data.symbol} - {subtype_str}: {alert_data.action}")
+        else:
+            self._log_alert(subtype_str, f"[DB ONLY] {alert_data.symbol} - {subtype_str}: {alert_data.action}")
+
         return alert_data
     
     def _is_on_cooldown(
@@ -504,7 +551,7 @@ class AlertService:
                     channel=channel,
                     username='CANSLIM Monitor'
                 )
-                self.logger.info(f"Discord embed sent: {alert_data.symbol} - {alert_data.subtype.value}")
+                self.logger.debug(f"Discord embed sent: {alert_data.symbol} - {alert_data.subtype.value}")
             else:
                 # Legacy format - format as plain text
                 formatted_message = self._format_discord_message(alert_data)
@@ -516,7 +563,7 @@ class AlertService:
                     alert_type=alert_data.alert_type.value,
                     priority=alert_data.priority
                 )
-                self.logger.info(f"Discord alert sent: {alert_data.title}")
+                self.logger.debug(f"Discord alert sent: {alert_data.title}")
             
         except Exception as e:
             self.logger.error(f"Failed to send Discord alert: {e}")

@@ -133,9 +133,9 @@ class AlertCheckerTool:
                 self.logger.error(f"Error in {checker.name} checker: {e}")
 
         # Convert to display format
-        return [self._alert_to_dict(alert) for alert in alerts]
+        return [self._alert_to_dict(alert, position) for alert in alerts]
 
-    def _alert_to_dict(self, alert: AlertData) -> Dict[str, Any]:
+    def _alert_to_dict(self, alert: AlertData, position: Position = None) -> Dict[str, Any]:
         """
         Convert AlertData to dict format for AlertTableWidget.
 
@@ -189,6 +189,9 @@ class AlertCheckerTool:
             'message': alert.message,
             'action': alert.action,
             'priority': alert.priority,
+
+            # Volume context
+            'avg_volume': getattr(position, 'avg_volume_50d', None) if position else None,
         }
 
     def _get_severity(self, alert_type: AlertType, subtype: AlertSubtype) -> str:

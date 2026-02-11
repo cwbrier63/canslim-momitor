@@ -162,7 +162,8 @@ class PositionContext:
             base_stage=base_stage,
             days_in_position=days_in_position,
             days_since_breakout=days_since_breakout,
-            eight_week_hold_active=False,  # TODO: Add to Position model
+            eight_week_hold_active=position.eight_week_hold_active or False,
+            eight_week_hold_end_date=position.eight_week_hold_end,
             py1_done=position.py1_done or False,
             py2_done=position.py2_done or False,
             tp1_sold=position.tp1_sold or 0,

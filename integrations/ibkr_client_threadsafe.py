@@ -480,9 +480,14 @@ class ThreadSafeIBKRClient:
         """
         Active heartbeat - request server time to verify connection is truly alive.
         Returns server time string if successful, None if failed.
+
+        IMPORTANT: Must use async version (reqCurrentTimeAsync) because this
+        coroutine runs on the IB event loop. The sync reqCurrentTime() tries
+        to call self._run() which re-enters the already-running event loop,
+        causing a deadlock and guaranteed failure.
         """
         try:
-            server_time = self._ib.reqCurrentTime()
+            server_time = await self._ib.reqCurrentTimeAsync()
             if server_time:
                 return server_time.isoformat() if hasattr(server_time, 'isoformat') else str(server_time)
             return None

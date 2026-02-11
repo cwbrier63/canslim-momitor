@@ -81,6 +81,13 @@ class Position(Base):
     # Pyramid Flags
     py1_done = Column(Boolean, default=False)
     py2_done = Column(Boolean, default=False)
+
+    # 8-Week Hold Rule
+    eight_week_hold_active = Column(Boolean, default=False)
+    eight_week_hold_start = Column(Date)
+    eight_week_hold_end = Column(Date)
+    eight_week_power_move_pct = Column(Float)
+    eight_week_power_move_weeks = Column(Float)
     
     # CANSLIM Factors (MarketSurge data - Left Panel)
     rs_rating = Column(Integer)
@@ -218,6 +225,8 @@ TRACKED_FIELDS = {
     'entry_grade', 'entry_score', 'notes',
     # Pyramid flags
     'py1_done', 'py2_done',
+    # 8-week hold
+    'eight_week_hold_active', 'eight_week_hold_start', 'eight_week_hold_end',
     # Targets (when manually set)
     'tp1_target', 'tp2_target',
 }

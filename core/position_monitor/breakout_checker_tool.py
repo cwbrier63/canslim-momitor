@@ -160,28 +160,28 @@ class BreakoutCheckerTool:
             subtype = AlertSubtype.SUPPRESSED if market_in_correction else AlertSubtype.CONFIRMED
             alerts.append(self._create_alert(
                 position, current_price, distance_pct, volume_ratio,
-                subtype, pivot_analysis, market_regime, avg_volume
+                subtype, pivot_analysis, market_regime, avg_volume, technical_data
             ))
 
         # IN_BUY_ZONE: above pivot, in buy zone, but weak close or low volume
         elif above_pivot and in_buy_zone:
             alerts.append(self._create_alert(
                 position, current_price, distance_pct, volume_ratio,
-                AlertSubtype.IN_BUY_ZONE, pivot_analysis, market_regime, avg_volume
+                AlertSubtype.IN_BUY_ZONE, pivot_analysis, market_regime, avg_volume, technical_data
             ))
 
         # EXTENDED: beyond buy zone
         elif is_extended and distance_pct <= self.max_extended_pct:
             alerts.append(self._create_alert(
                 position, current_price, distance_pct, volume_ratio,
-                AlertSubtype.EXTENDED, pivot_analysis, market_regime, avg_volume
+                AlertSubtype.EXTENDED, pivot_analysis, market_regime, avg_volume, technical_data
             ))
 
         # APPROACHING: near pivot
         elif is_approaching:
             alerts.append(self._create_alert(
                 position, current_price, distance_pct, volume_ratio,
-                AlertSubtype.APPROACHING, pivot_analysis, market_regime, avg_volume
+                AlertSubtype.APPROACHING, pivot_analysis, market_regime, avg_volume, technical_data
             ))
 
         # BELOW PIVOT: not at breakout yet (informational)
@@ -189,7 +189,7 @@ class BreakoutCheckerTool:
             # Create a custom "BELOW_PIVOT" status alert
             alerts.append(self._create_below_pivot_alert(
                 position, current_price, distance_pct, volume_ratio,
-                pivot_analysis, market_regime, avg_volume
+                pivot_analysis, market_regime, avg_volume, technical_data
             ))
 
         # Also check for alternative entry opportunities (MA pullbacks)
@@ -274,8 +274,8 @@ class BreakoutCheckerTool:
             'volume_ratio': alert_data.context.volume_ratio if alert_data.context else 0,
             'avg_volume': getattr(position, 'avg_volume_50d', 0) or 500000,
             'market_regime': '',
-            'grade': getattr(position, 'grade', '') or '',
-            'score': getattr(position, 'score', 0) or 0,
+            'grade': position.entry_grade or '',
+            'score': position.entry_score or 0,
             'pattern': position.pattern or 'Unknown',
             'base_stage': position.base_stage or '?',
             'rs_rating': position.rs_rating,
@@ -295,6 +295,7 @@ class BreakoutCheckerTool:
         pivot_analysis: PivotAnalysis,
         market_regime: str,
         avg_volume: int,
+        technical_data: Dict[str, Any] = None,
     ) -> Dict[str, Any]:
         """Create alert dict in format expected by AlertTableWidget."""
         pivot = position.pivot
@@ -333,6 +334,7 @@ class BreakoutCheckerTool:
             'alert_time': datetime.now().isoformat(),
             'price': current_price,
             'pnl_pct_at_alert': distance_pct,  # Distance from pivot for watchlist
+            'avg_cost_at_alert': None,  # Watchlist has no entry price
             'pivot_at_alert': pivot,
             'severity': self.SEVERITY_MAP.get(subtype, 'neutral'),
             'acknowledged': False,
@@ -341,13 +343,15 @@ class BreakoutCheckerTool:
             'volume_ratio': volume_ratio,
             'avg_volume': avg_volume,
             'market_regime': market_regime,
-            'grade': getattr(position, 'grade', '') or '',
-            'score': getattr(position, 'score', 0) or 0,
+            'grade': position.entry_grade or '',
+            'score': position.entry_score or 0,
             'pattern': position.pattern or 'Unknown',
             'base_stage': position.base_stage or '?',
             'rs_rating': position.rs_rating,
             'buy_zone_low': pivot,
             'buy_zone_high': buy_zone_top,
+            'ma50': technical_data.get('ma_50') if technical_data else None,
+            'ma21': (technical_data.get('ma_21') or technical_data.get('ema_21')) if technical_data else None,
         }
 
     def _create_below_pivot_alert(
@@ -359,6 +363,7 @@ class BreakoutCheckerTool:
         pivot_analysis: PivotAnalysis,
         market_regime: str,
         avg_volume: int,
+        technical_data: Dict[str, Any] = None,
     ) -> Dict[str, Any]:
         """Create informational alert for stocks below pivot."""
         pivot = position.pivot
@@ -376,6 +381,7 @@ class BreakoutCheckerTool:
             'alert_time': datetime.now().isoformat(),
             'price': current_price,
             'pnl_pct_at_alert': distance_pct,
+            'avg_cost_at_alert': None,  # Watchlist has no entry price
             'pivot_at_alert': pivot,
             'severity': 'neutral',
             'acknowledged': False,
@@ -384,13 +390,15 @@ class BreakoutCheckerTool:
             'volume_ratio': volume_ratio,
             'avg_volume': avg_volume,
             'market_regime': market_regime,
-            'grade': getattr(position, 'grade', '') or '',
-            'score': getattr(position, 'score', 0) or 0,
+            'grade': position.entry_grade or '',
+            'score': position.entry_score or 0,
             'pattern': position.pattern or 'Unknown',
             'base_stage': position.base_stage or '?',
             'rs_rating': position.rs_rating,
             'buy_zone_low': pivot,
             'buy_zone_high': buy_zone_top,
+            'ma50': technical_data.get('ma_50') if technical_data else None,
+            'ma21': (technical_data.get('ma_21') or technical_data.get('ema_21')) if technical_data else None,
         }
 
     def _calculate_rvol(self, current_volume: int, avg_daily_volume: int) -> float:

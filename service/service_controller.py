@@ -417,6 +417,7 @@ class ServiceController:
                 cooldown_minutes=alert_config.get('cooldown_minutes', 60),
                 enable_cooldown=alert_config.get('enable_cooldown', False),
                 enable_suppression=alert_config.get('enable_suppression', True),
+                alert_routing=alert_config.get('alert_routing', {}),
                 logger=get_logger('breakout')  # Use breakout logger so alerts appear in breakout log
             )
             self.logger.info(f"Alert service initialized (cooldown={'enabled' if alert_config.get('enable_cooldown', False) else 'disabled'}, discord={'configured' if self.discord_notifier else 'NOT configured'})")
@@ -430,7 +431,8 @@ class ServiceController:
         from ..utils.logging import get_logger
         
         thread_config = self.config.get('threads', {})
-        breakout_config = self.config.get('breakout', {})
+        alert_cfg = self.config.get('alerts', {})
+        breakout_config = alert_cfg.get('breakout', {}) or self.config.get('breakout', {})
         
         # Create volume service for breakout thread (for intraday volume fallback)
         volume_service = None
@@ -606,6 +608,16 @@ class ServiceController:
         """Reload configuration from file."""
         try:
             self._load_config()
+
+            # Refresh alert routing on live AlertService instances
+            alert_routing = self.config.get('alerts', {}).get('alert_routing', {})
+            if hasattr(self, 'alert_service') and self.alert_service:
+                self.alert_service.load_routing(alert_routing)
+            # Also refresh position thread's AlertService
+            if hasattr(self, 'position_thread') and self.position_thread:
+                if hasattr(self.position_thread, 'alert_service') and self.position_thread.alert_service:
+                    self.position_thread.alert_service.load_routing(alert_routing)
+
             return {'success': True, 'message': 'Configuration reloaded'}
         except Exception as e:
             return {'success': False, 'error': str(e)}

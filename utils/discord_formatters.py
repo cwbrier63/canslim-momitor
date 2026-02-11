@@ -342,10 +342,15 @@ def build_eight_week_hold_embed(
     ma_21: Optional[float] = None,
     ma_50: Optional[float] = None,
     market_regime: str = "",
+    hold_until=None,
 ) -> str:
     """Build embed for 8-week hold rule alert."""
     rs_str = str(rs_rating) if rs_rating else "N/A"
-    line2 = f"Days held: {days_held} | RS: {rs_str}"
+    hold_str = f" | Hold until: {hold_until.strftime('%m/%d/%Y')}" if hold_until else ""
+    line2 = f"Days held: {days_held} | RS: {rs_str}{hold_str}"
+    action = "Hold through 8 weeks unless sharp break"
+    if hold_until:
+        action = f"Hold until {hold_until.strftime('%m/%d')} unless sharp break below 10-wk MA"
     return build_position_embed(
         alert_type='PROFIT',
         subtype='EIGHT_WEEK_HOLD',
@@ -357,7 +362,7 @@ def build_eight_week_hold_embed(
         ma_21=ma_21,
         ma_50=ma_50,
         days_in_position=days_held,
-        action="Hold through 8 weeks unless sharp break",
+        action=action,
         priority='P2',
         market_regime=market_regime,
         custom_title=f"8-WEEK HOLD RULE: {symbol}",

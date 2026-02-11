@@ -269,7 +269,11 @@ class MassiveHistoricalClient:
                 ))
             
             bars.sort(key=lambda x: x.date)
-            
+
+            # Clean erroneous data (bad ticks, extreme wicks, negative prices)
+            from canslim_monitor.utils.data_cleaner import clean_daily_bars
+            bars = clean_daily_bars(bars)
+
             logger.info(f"Fetched {len(bars)} daily bars for {polygon_symbol} from Polygon")
             return bars
             
