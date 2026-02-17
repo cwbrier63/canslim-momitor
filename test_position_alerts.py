@@ -15,6 +15,8 @@ Scenarios:
     pyramid   - Simulate pyramid add zones
     ma        - Simulate MA violations
     health    - Simulate health warnings
+    reentry   - Simulate re-entry/add opportunities (21 EMA, 50 MA, pivot retest, buy zone)
+    alt_entry - Simulate watchlist alt entry alerts (21 EMA, 50 MA pullback, pivot retest)
     all       - Run all scenarios
 """
 
@@ -271,8 +273,16 @@ def run_pyramid_scenario(position, config, send_discord=False):
     alerts = checker.check(position, context)
     display_alerts(alerts, send_discord, config)
 
-    # Test 4: Pullback to 21 EMA
-    print("\n--- Test 4: Pullback to 21 EMA ---")
+    # Test 4: PY2 Extended
+    print("\n--- Test 4: PY2 Extended (+12%) ---")
+    context = build_mock_context(position, pnl_override=12.0)
+    context = PositionContext(**{**context.__dict__, 'state': 2, 'days_in_position': 10, 'py1_done': True})
+    checker._cooldowns = {}
+    alerts = checker.check(position, context)
+    display_alerts(alerts, send_discord, config)
+
+    # Test 5: Pullback to 21 EMA
+    print("\n--- Test 5: Pullback to 21 EMA ---")
     entry = position.avg_cost or position.pivot or 100
     price = entry * 1.05
     context = build_mock_context(position, price_override=price, ma_21=price * 1.005)  # Price near 21 EMA
@@ -320,8 +330,17 @@ def run_ma_scenario(position, config, send_discord=False):
     alerts = checker.check(position, context)
     display_alerts(alerts, send_discord, config)
 
-    # Test 4: Climax Top
-    print("\n--- Test 4: Climax Top ---")
+    # Test 4: 10-Week MA Sell
+    print("\n--- Test 4: 10-Week MA Sell ---")
+    price = entry * 1.05
+    context = build_mock_context(position, price_override=price)
+    context = PositionContext(**{**context.__dict__, 'ma_10_week': price * 1.02})  # Below 10-week MA
+    checker._cooldowns = {}
+    alerts = checker.check(position, context)
+    display_alerts(alerts, send_discord, config)
+
+    # Test 5: Climax Top
+    print("\n--- Test 5: Climax Top ---")
     price = entry * 1.25
     context = build_mock_context(position, price_override=price, pnl_override=25.0, volume_ratio=3.0)
     context = PositionContext(**{
@@ -368,14 +387,156 @@ def run_health_scenario(position, config, send_discord=False):
     alerts = checker.check(position, context)
     display_alerts(alerts, send_discord, config)
 
-    # Test 4: Extended from Pivot
-    print("\n--- Test 4: Extended from Pivot (+8%) ---")
+    # Test 4: Health Critical (score < 50)
+    print("\n--- Test 4: Health Critical (score < 50) ---")
+    context = build_mock_context(position, pnl_override=-2.0)
+    context = PositionContext(**{
+        **context.__dict__,
+        'health_score': 35,
+        'health_rating': 'CRITICAL',
+        'base_stage': 4,
+    })
+    checker._cooldowns = {}
+    checker._previous_health[position.symbol] = 65  # Was above 50, now below
+    alerts = checker.check(position, context)
+    display_alerts(alerts, send_discord, config)
+
+    # Test 5: Extended from Pivot
+    print("\n--- Test 5: Extended from Pivot (+8%) ---")
     entry = position.avg_cost or position.pivot or 100
     pivot = position.pivot or entry
     price = pivot * 1.08  # 8% above pivot
     context = build_mock_context(position, price_override=price)
     context = PositionContext(**{**context.__dict__, 'pivot_price': pivot})
     checker._cooldowns = {}
+    alerts = checker.check(position, context)
+    display_alerts(alerts, send_discord, config)
+
+
+def run_reentry_scenario(position, config, send_discord=False):
+    """Test re-entry/add opportunity alerts."""
+    from canslim_monitor.core.position_monitor.checkers.reentry_checker import ReentryChecker
+    from canslim_monitor.core.position_monitor.checkers.base_checker import PositionContext
+
+    print("\n" + "="*60)
+    print(f"REENTRY SCENARIO: {position.symbol}")
+    print("="*60)
+
+    checker = ReentryChecker(config.get('position_monitoring', {}), logger)
+
+    entry = position.avg_cost or position.pivot or 100
+
+    # Test 1: 21 EMA Bounce (ADD / EMA_21)
+    print("\n--- Test 1: 21 EMA Bounce ---")
+    price = entry * 1.08  # Up 8% from entry
+    ma_21 = price * 0.995  # Price near 21 EMA
+    context = build_mock_context(position, price_override=price, ma_21=ma_21, volume_ratio=1.2)
+    context = PositionContext(**{**context.__dict__, 'state': 2, 'days_in_position': 20})
+    # Seed price history so bounce detection works
+    checker._previous_prices[position.symbol] = [ma_21 * 0.99, ma_21 * 1.001, price]
+    alerts = checker.check(position, context)
+    display_alerts(alerts, send_discord, config)
+
+    # Test 2: 50 MA Bounce (ADD / PULLBACK)
+    print("\n--- Test 2: 50 MA Bounce ---")
+    price = entry * 1.10  # Up 10% from entry
+    ma_50 = price * 0.995  # Price near 50 MA
+    context = build_mock_context(position, price_override=price, ma_50=ma_50, volume_ratio=1.5)
+    context = PositionContext(**{**context.__dict__, 'state': 2, 'days_in_position': 30})
+    checker._previous_prices[position.symbol] = [ma_50 * 0.99, ma_50 * 1.001, price]
+    checker._cooldowns = {}
+    alerts = checker.check(position, context)
+    display_alerts(alerts, send_discord, config)
+
+    # Test 3: Pivot Retest (ADD / IN_BUY_ZONE)
+    print("\n--- Test 3: Pivot Retest ---")
+    pivot = position.pivot or entry
+    price = pivot * 1.01  # 1% above pivot
+    context = build_mock_context(position, price_override=price)
+    context = PositionContext(**{
+        **context.__dict__,
+        'state': 1,
+        'days_in_position': 25,
+        'pivot_price': pivot,
+        'max_gain_pct': 8.0,  # Was up 8%, now back at pivot
+    })
+    checker._cooldowns = {}
+    alerts = checker.check(position, context)
+    display_alerts(alerts, send_discord, config)
+
+    # Test 4: Pullback to Buy Zone (ADD / PULLBACK)
+    print("\n--- Test 4: Pullback to Buy Zone ---")
+    price = pivot * 1.04  # 4% above pivot (in buy zone)
+    context = build_mock_context(position, price_override=price)
+    context = PositionContext(**{
+        **context.__dict__,
+        'state': 1,
+        'days_in_position': 25,
+        'pivot_price': pivot,
+        'max_gain_pct': 10.0,  # Was up 10%, now back in buy zone
+    })
+    checker._cooldowns = {}
+    alerts = checker.check(position, context)
+    display_alerts(alerts, send_discord, config)
+
+
+def run_alt_entry_scenario(position, config, send_discord=False):
+    """Test watchlist alternative entry alerts."""
+    from canslim_monitor.core.position_monitor.checkers.watchlist_alt_entry_checker import WatchlistAltEntryChecker
+    from canslim_monitor.core.position_monitor.checkers.base_checker import PositionContext
+
+    print("\n" + "="*60)
+    print(f"ALT ENTRY SCENARIO: {position.symbol}")
+    print("="*60)
+
+    checker = WatchlistAltEntryChecker(config.get('position_monitoring', {}), logger)
+
+    pivot = position.pivot or position.avg_cost or 100
+
+    # Pre-mark symbol as "was extended" so pullback alerts can fire
+    from datetime import datetime
+    checker._extended_symbols[position.symbol] = datetime.now()
+
+    # Test 1: 21 EMA Pullback (ALT_ENTRY / MA_BOUNCE)
+    print("\n--- Test 1: 21 EMA Pullback (watchlist) ---")
+    price = pivot * 1.03  # 3% above pivot (pulled back from extended)
+    ma_21 = price * 1.005  # Price near 21 EMA
+    context = build_mock_context(position, price_override=price, ma_21=ma_21, ma_50=pivot * 0.98, volume_ratio=0.9)
+    context = PositionContext(**{
+        **context.__dict__,
+        'state': 0,  # Watchlist
+        'pivot_price': pivot,
+    })
+    alerts = checker.check(position, context)
+    display_alerts(alerts, send_discord, config)
+
+    # Test 2: 50 MA Pullback (ALT_ENTRY / MA_BOUNCE)
+    print("\n--- Test 2: 50 MA Pullback (watchlist) ---")
+    price = pivot * 1.02  # 2% above pivot
+    ma_50 = price * 1.005  # Price near 50 MA
+    context = build_mock_context(position, price_override=price, ma_21=price * 1.05, ma_50=ma_50, volume_ratio=0.9)
+    context = PositionContext(**{
+        **context.__dict__,
+        'state': 0,
+        'pivot_price': pivot,
+    })
+    checker._cooldowns = {}
+    # Mark extended again (check consumes it)
+    checker._extended_symbols[position.symbol] = datetime.now()
+    alerts = checker.check(position, context)
+    display_alerts(alerts, send_discord, config)
+
+    # Test 3: Pivot Retest (ALT_ENTRY / PIVOT_RETEST)
+    print("\n--- Test 3: Pivot Retest (watchlist) ---")
+    price = pivot * 1.01  # 1% above pivot
+    context = build_mock_context(position, price_override=price, ma_21=pivot * 1.08, ma_50=pivot * 0.95, volume_ratio=0.8)
+    context = PositionContext(**{
+        **context.__dict__,
+        'state': 0,
+        'pivot_price': pivot,
+    })
+    checker._cooldowns = {}
+    checker._extended_symbols[position.symbol] = datetime.now()
     alerts = checker.check(position, context)
     display_alerts(alerts, send_discord, config)
 
@@ -466,22 +627,25 @@ def main():
 Scenarios:
   stop      Simulate stop loss alerts (warning, hard stop, trailing)
   profit    Simulate profit alerts (TP1, TP2, 8-week hold)
-  pyramid   Simulate pyramid alerts (PY1, PY2, pullback)
-  ma        Simulate MA alerts (50 MA, 21 EMA, climax top)
-  health    Simulate health alerts (earnings, late stage, extended)
+  pyramid   Simulate pyramid alerts (PY1, PY2, PY2 extended, pullback)
+  ma        Simulate MA alerts (50 MA, 21 EMA, 10-week, climax top)
+  health    Simulate health alerts (critical, earnings, late stage, extended)
+  reentry   Simulate re-entry alerts (21 EMA bounce, 50 MA bounce, pivot retest, buy zone)
+  alt_entry Simulate watchlist alt entry alerts (21 EMA, 50 MA pullback, pivot retest)
   all       Run all scenarios
 
 Examples:
   python test_position_alerts.py                         # List positions
   python test_position_alerts.py --symbol NVDA           # Test all scenarios for NVDA
   python test_position_alerts.py --symbol NVDA --scenario stop
+  python test_position_alerts.py --symbol NVDA --scenario reentry
   python test_position_alerts.py --symbol NVDA --send    # Send to Discord
         """
     )
 
     parser.add_argument('--symbol', '-s', help='Symbol to test')
     parser.add_argument('--scenario', '-c',
-                       choices=['stop', 'profit', 'pyramid', 'ma', 'health', 'all'],
+                       choices=['stop', 'profit', 'pyramid', 'ma', 'health', 'reentry', 'alt_entry', 'all'],
                        default='all', help='Scenario to run')
     parser.add_argument('--send', action='store_true',
                        help='Actually send alerts to Discord')
@@ -524,6 +688,8 @@ Examples:
         'pyramid': run_pyramid_scenario,
         'ma': run_ma_scenario,
         'health': run_health_scenario,
+        'reentry': run_reentry_scenario,
+        'alt_entry': run_alt_entry_scenario,
     }
 
     if args.scenario == 'all':

@@ -47,8 +47,8 @@ class IBKRConnectionBridge(QObject):
 class PriceUpdateWorker(QObject):
     """
     Worker that fetches prices from IBKR in a background thread.
-    Falls back to Polygon for index ETFs if IBKR unavailable.
-    Uses module-level cache to respect Polygon rate limits (5 calls/min).
+    Falls back to Massive realtime provider (delayed Polygon quotes) if IBKR unavailable.
+    Uses provider abstraction when available, raw clients as legacy fallback.
     """
     finished = pyqtSignal(dict)  # Emits {symbol: price_data}
     error = pyqtSignal(str)
@@ -56,11 +56,14 @@ class PriceUpdateWorker(QObject):
 
     INDEX_ETFS = ['SPY', 'QQQ', 'DIA', 'IWM']
 
-    def __init__(self, ibkr_client, symbols: List[str], polygon_api_key: str = None):
+    def __init__(self, ibkr_client, symbols: List[str], polygon_api_key: str = None,
+                 realtime_provider=None, fallback_provider=None):
         super().__init__()
         self.ibkr_client = ibkr_client
         self.symbols = symbols
         self.polygon_api_key = polygon_api_key
+        self.realtime_provider = realtime_provider      # IBKRRealtimeProvider (when connected)
+        self.fallback_provider = fallback_provider      # MassiveRealtimeProvider (delayed quotes)
 
     # Max Polygon API calls per cycle (Stocks Starter: 5 calls/min)
     MAX_POLYGON_CALLS = 4  # Reserve 1 for overhead
@@ -74,8 +77,23 @@ class PriceUpdateWorker(QObject):
             prices = {}
             ibkr_was_connected = False
 
-            # Try IBKR first
-            if self.ibkr_client:
+            # Try realtime provider (IBKR) first
+            if self.realtime_provider and self.realtime_provider.is_connected():
+                ibkr_was_connected = True
+                logger.debug(f"Using realtime provider for {len(self.symbols)} symbols")
+                try:
+                    provider_quotes = self.realtime_provider.get_quotes(self.symbols)
+                    if provider_quotes:
+                        for sym, quote in provider_quotes.items():
+                            if quote and quote.last > 0:
+                                prices[sym] = quote.to_dict()
+                        logger.debug(f"Realtime provider returned prices for: {list(prices.keys())}")
+                except Exception as e:
+                    logger.warning(f"Realtime provider failed: {e}, trying raw client")
+                    ibkr_was_connected = False
+
+            # Legacy fallback: try raw IBKR client if provider didn't work
+            if not prices and self.ibkr_client:
                 ibkr_was_connected = self.ibkr_client.is_connected()
                 logger.debug(f"IBKR connected: {ibkr_was_connected}, fetching {len(self.symbols)} symbols")
                 if ibkr_was_connected:
@@ -89,17 +107,42 @@ class PriceUpdateWorker(QObject):
             missing_symbols = [s for s in self.symbols
                                if s not in prices or not prices.get(s, {}).get('last')]
 
-            if missing_symbols and self.polygon_api_key:
+            # Try fallback provider (Massive delayed quotes) for missing symbols
+            if missing_symbols and self.fallback_provider and self.fallback_provider.is_connected():
                 # Prioritize: index ETFs first, then position symbols
                 priority = [s for s in self.INDEX_ETFS if s in missing_symbols]
                 others = [s for s in missing_symbols if s not in self.INDEX_ETFS and s != 'VIX']
                 fetch_list = priority + others
-
-                # Cap at MAX_POLYGON_CALLS to respect rate limits
                 fetch_list = fetch_list[:self.MAX_POLYGON_CALLS]
 
                 if fetch_list:
-                    logger.debug(f"Polygon fallback for {len(fetch_list)} symbols: {fetch_list}")
+                    logger.debug(f"Fallback provider for {len(fetch_list)} symbols: {fetch_list}")
+                    try:
+                        fallback_quotes = self.fallback_provider.get_quotes(fetch_list)
+                        if fallback_quotes:
+                            for sym, quote in fallback_quotes.items():
+                                if quote and quote.last > 0:
+                                    qd = quote.to_dict()
+                                    # Add previousClose for D% calculation
+                                    if qd.get('close'):
+                                        qd['previousClose'] = qd['close']
+                                    prices[sym] = qd
+                            logger.debug(f"Fallback provider returned prices for: {list(fallback_quotes.keys())}")
+                    except Exception as e:
+                        logger.warning(f"Fallback provider failed: {e}, trying raw Polygon")
+
+            # Legacy fallback: raw Polygon API if provider didn't cover all symbols
+            missing_symbols = [s for s in self.symbols
+                               if s not in prices or not prices.get(s, {}).get('last')]
+
+            if missing_symbols and self.polygon_api_key:
+                priority = [s for s in self.INDEX_ETFS if s in missing_symbols]
+                others = [s for s in missing_symbols if s not in self.INDEX_ETFS and s != 'VIX']
+                fetch_list = priority + others
+                fetch_list = fetch_list[:self.MAX_POLYGON_CALLS]
+
+                if fetch_list:
+                    logger.debug(f"Raw Polygon fallback for {len(fetch_list)} symbols: {fetch_list}")
                     polygon_prices = self._fetch_from_polygon(fetch_list)
                     if polygon_prices:
                         logger.debug(f"Polygon returned prices for: {list(polygon_prices.keys())}")
@@ -1184,6 +1227,13 @@ class KanbanMainWindow(QMainWindow):
         self.ibkr_connected = False
         self.ibkr_bridge = None  # Qt signal bridge for IBKR thread -> GUI thread
         self._last_price_update_time = None  # Track when prices were last successfully updated
+
+        # Provider abstraction (Phase 8)
+        self.historical_provider = None   # MassiveHistoricalProvider (always available)
+        self.realtime_provider = None     # IBKRRealtimeProvider (when IBKR connected)
+        self.futures_provider = None      # IBKRFuturesProvider (when IBKR connected)
+        self.fallback_provider = None     # MassiveRealtimeProvider (delayed quotes fallback)
+        self._init_providers()
         
         # Price update worker thread
         self.price_worker = None
@@ -1232,6 +1282,93 @@ class KanbanMainWindow(QMainWindow):
         self._load_market_regime()  # Load regime data from database
         self._load_index_stats()    # Load index SMAs in background
     
+    def _init_providers(self):
+        """Initialize data providers via ProviderFactory.
+
+        Creates Massive providers (historical + delayed realtime) that are
+        always available.  IBKR providers are created later in
+        ``_on_start_service()`` when the user connects to IB Gateway.
+        """
+        try:
+            from canslim_monitor.providers.factory import ProviderFactory
+
+            factory = ProviderFactory(self.db.get_new_session)
+
+            # Seed DB from YAML if first run (safe to re-run)
+            if self.config:
+                factory.seed_from_yaml(self.config)
+
+            # Historical provider (Massive/Polygon) — always available
+            self.historical_provider = factory.get_historical()
+            if self.historical_provider:
+                self.logger.info(f"Historical provider ready: {self.historical_provider.name}")
+            else:
+                self.logger.warning("No historical provider available")
+
+            # Delayed realtime fallback (Massive) — used when IBKR is not connected
+            # Force get the Massive realtime even though IBKR has higher priority
+            self._init_massive_realtime_fallback()
+
+        except Exception as e:
+            self.logger.warning(f"Provider initialization failed (non-fatal): {e}")
+
+    def _init_massive_realtime_fallback(self):
+        """Initialize Massive realtime provider as a fallback for when IBKR is unavailable."""
+        try:
+            from canslim_monitor.providers.massive import MassiveRealtimeProvider
+
+            api_key = (
+                self.config.get('market_data', {}).get('api_key') or
+                self.config.get('polygon', {}).get('api_key')
+            )
+            if not api_key:
+                return
+
+            base_url = (
+                self.config.get('market_data', {}).get('base_url') or
+                'https://api.polygon.io'
+            )
+
+            self.fallback_provider = MassiveRealtimeProvider(
+                api_key=api_key,
+                base_url=base_url,
+                cache_seconds=60,
+            )
+            if self.fallback_provider.connect():
+                self.logger.info("Massive realtime fallback provider ready")
+            else:
+                self.fallback_provider = None
+                self.logger.warning("Massive realtime fallback provider failed to connect")
+
+        except Exception as e:
+            self.logger.debug(f"Could not init Massive realtime fallback: {e}")
+
+    def _init_ibkr_providers(self):
+        """Wrap the connected IBKR client in provider abstractions.
+
+        Called after ``self.ibkr_client`` is successfully connected in
+        ``_on_start_service()``.  Both providers share the same underlying
+        ``ThreadSafeIBKRClient`` connection.
+        """
+        if not self.ibkr_client:
+            return
+
+        try:
+            from canslim_monitor.providers.ibkr import IBKRRealtimeProvider, IBKRFuturesProvider
+
+            self.realtime_provider = IBKRRealtimeProvider(ibkr_client=self.ibkr_client)
+            self.realtime_provider._client = self.ibkr_client  # Skip connect(), already connected
+            self.realtime_provider._record_success()
+            self.logger.info("IBKR realtime provider initialized (shared client)")
+
+            self.futures_provider = IBKRFuturesProvider(ibkr_client=self.ibkr_client)
+            self.futures_provider._client = self.ibkr_client
+            self.futures_provider._record_success()
+            self.logger.info("IBKR futures provider initialized (shared client)")
+
+        except Exception as e:
+            self.logger.warning(f"Could not init IBKR providers (non-fatal): {e}")
+
     def _setup_ui(self):
         """Set up the main window UI."""
         self.setWindowTitle("CANSLIM Position Manager")
@@ -1718,51 +1855,71 @@ class KanbanMainWindow(QMainWindow):
             self._fetch_and_update_index_stats()
 
     def _fetch_and_update_index_stats(self):
-        """Fetch index data from Polygon and update banner with SMAs."""
+        """Fetch index data and update banner with SMAs.
+
+        Tries the historical provider first, falls back to legacy
+        ``fetch_index_daily()`` if the provider is unavailable.
+        """
         try:
-            import yaml
+            # Try historical provider first
+            spy_bars = qqq_bars = dia_bars = iwm_bars = []
+            fetched_via_provider = False
 
-            # Load config for API key
-            config = getattr(self, 'config', {}) or {}
-            if not config:
-                config_paths = ['user_config.yaml', 'config.yaml']
-                for path in config_paths:
-                    import os
-                    if os.path.exists(path):
-                        with open(path, 'r') as f:
-                            config = yaml.safe_load(f) or {}
-                        break
+            if self.historical_provider and self.historical_provider.is_connected():
+                try:
+                    self.logger.info("Loading index stats via historical provider...")
+                    for sym in ['SPY', 'QQQ', 'DIA', 'IWM']:
+                        bars = self.historical_provider.get_daily_bars(sym, days=300)
+                        if sym == 'SPY': spy_bars = bars
+                        elif sym == 'QQQ': qqq_bars = bars
+                        elif sym == 'DIA': dia_bars = bars
+                        elif sym == 'IWM': iwm_bars = bars
+                    fetched_via_provider = bool(spy_bars)
+                except Exception as e:
+                    self.logger.warning(f"Historical provider failed for index stats: {e}")
 
-            polygon_key = (
-                config.get('market_data', {}).get('api_key') or
-                config.get('polygon', {}).get('api_key')
-            )
+            # Legacy fallback
+            if not fetched_via_provider:
+                import yaml
+                config = getattr(self, 'config', {}) or {}
+                if not config:
+                    config_paths = ['user_config.yaml', 'config.yaml']
+                    for path in config_paths:
+                        import os
+                        if os.path.exists(path):
+                            with open(path, 'r') as f:
+                                config = yaml.safe_load(f) or {}
+                            break
 
-            if not polygon_key:
-                self.logger.debug("No Polygon API key - skipping index stats load")
-                return
+                polygon_key = (
+                    config.get('market_data', {}).get('api_key') or
+                    config.get('polygon', {}).get('api_key')
+                )
 
-            self.logger.info("Loading index stats from Polygon...")
+                if not polygon_key:
+                    self.logger.debug("No Polygon API key - skipping index stats load")
+                    return
 
-            # Import and fetch data
-            from canslim_monitor.regime.historical_data import fetch_index_daily
+                self.logger.info("Loading index stats from Polygon (legacy)...")
 
-            api_config = {'polygon': {'api_key': polygon_key}}
-            data = fetch_index_daily(
-                symbols=['SPY', 'QQQ', 'DIA', 'IWM'],
-                lookback_days=300,  # Need 300 calendar days to get 200+ trading days for SMA
-                config=api_config,
-                use_indices=False
-            )
+                from canslim_monitor.regime.historical_data import fetch_index_daily
 
-            if not data:
-                self.logger.warning("No data returned from Polygon")
-                return
+                api_config = {'polygon': {'api_key': polygon_key}}
+                data = fetch_index_daily(
+                    symbols=['SPY', 'QQQ', 'DIA', 'IWM'],
+                    lookback_days=300,
+                    config=api_config,
+                    use_indices=False
+                )
 
-            spy_bars = data.get('SPY', [])
-            qqq_bars = data.get('QQQ', [])
-            dia_bars = data.get('DIA', [])
-            iwm_bars = data.get('IWM', [])
+                if not data:
+                    self.logger.warning("No data returned from Polygon")
+                    return
+
+                spy_bars = data.get('SPY', [])
+                qqq_bars = data.get('QQQ', [])
+                dia_bars = data.get('DIA', [])
+                iwm_bars = data.get('IWM', [])
 
             self.logger.info(
                 f"Fetched bars - SPY: {len(spy_bars)}, QQQ: {len(qqq_bars)}, "
@@ -2400,6 +2557,7 @@ class KanbanMainWindow(QMainWindow):
             position_data = {
                 'id': position_id,  # Store ID for later update
                 'symbol': position.symbol,
+                'state': position.state,
                 'pattern': position.pattern,
                 'pivot': position.pivot,
                 'stop_price': position.stop_price,
@@ -2433,10 +2591,13 @@ class KanbanMainWindow(QMainWindow):
                 # Position details
                 'e1_shares': position.e1_shares,
                 'e1_price': position.e1_price,
+                'e1_date': position.e1_date,
                 'e2_shares': position.e2_shares,
                 'e2_price': position.e2_price,
+                'e2_date': position.e2_date,
                 'e3_shares': position.e3_shares,
                 'e3_price': position.e3_price,
+                'e3_date': position.e3_date,
                 # Exit / Close
                 'tp1_sold': position.tp1_sold,
                 'tp1_price': position.tp1_price,
@@ -2493,24 +2654,39 @@ class KanbanMainWindow(QMainWindow):
         session = self.db.get_new_session()
         try:
             repos = RepositoryManager(session)
+            position = repos.positions.get_by_id(position_id)
+            if not position:
+                self.logger.error(f"Position {position_id} not found")
+                return
 
-            # Update position
-            repos.positions.update_by_id(position_id, **result)
+            # Check if state was changed
+            new_state = result.pop('state', None)
+            state_changed = new_state is not None and new_state != position.state
+
+            if state_changed:
+                # Use transition_state for proper state_updated_at and history tracking
+                self.logger.info(f"  STATE CHANGE: {position.state} -> {new_state}")
+                repos.positions.transition_state(position, new_state, **result)
+            else:
+                # Normal field update (no state change)
+                repos.positions.update(position, **result)
+
             session.commit()
 
             # Verify save by re-reading from database
             updated_position = repos.positions.get_by_id(position_id)
             if updated_position:
+                self.logger.info(f"  SAVED state: {updated_position.state}")
                 self.logger.info(f"  SAVED stop_price: {updated_position.stop_price}")
                 self.logger.info(f"  SAVED pivot: {updated_position.pivot}")
                 self.logger.info(f"  SAVED hard_stop_pct: {updated_position.hard_stop_pct}")
                 self.logger.info(f"  SAVED close_price: {updated_position.close_price}")
                 self.logger.info(f"  SAVED close_date: {updated_position.close_date}")
                 self.logger.info(f"  SAVED realized_pnl: {updated_position.realized_pnl}")
-            
+
             self.status_bar.showMessage(f"Updated {symbol}")
             self._load_positions()
-            
+
         except Exception as e:
             self.logger.error(f"Error updating position: {e}")
             session.rollback()
@@ -2554,6 +2730,51 @@ class KanbanMainWindow(QMainWindow):
             # View history action
             history_action = menu.addAction("📜 View History")
             history_action.triggered.connect(lambda: self._show_position_history(position_id))
+
+            # View chart action — extract data while session is open
+            _chart_data = {
+                'symbol': position.symbol, 'state': position.state,
+                'pivot': position.pivot, 'avg_cost': position.avg_cost,
+                'e1_price': position.e1_price, 'e2_price': position.e2_price,
+                'e3_price': position.e3_price,
+                'e1_shares': position.e1_shares, 'e2_shares': position.e2_shares,
+                'e3_shares': position.e3_shares,
+                'hard_stop_pct': position.hard_stop_pct or 7.0,
+                'tp1_pct': position.tp1_pct or 20.0, 'tp2_pct': position.tp2_pct or 30.0,
+                'tp1_target': position.tp1_target, 'tp2_target': position.tp2_target,
+                'stop_price': position.stop_price,
+                'pyramid1_price': position.pyramid1_price,
+                'pyramid2_price': position.pyramid2_price,
+                'base_stage': position.base_stage,
+                'pattern': position.pattern,
+                'base_depth': position.base_depth,
+                'base_length': position.base_length,
+                'total_shares': position.total_shares,
+                'close_price': position.close_price, 'close_date': position.close_date,
+                'entry_date': position.entry_date, 'e1_date': position.e1_date,
+                'e2_date': position.e2_date, 'e3_date': position.e3_date,
+                # Company info (from Polygon)
+                'company_name': position.company_name,
+                'industry': position.industry,
+                'sector': position.sector,
+                # Scorecard fields
+                'rs_rating': position.rs_rating,
+                'ad_rating': position.ad_rating,
+                'comp_rating': position.comp_rating,
+                'eps_rating': position.eps_rating,
+                'smr_rating': position.smr_rating,
+                'ud_vol_ratio': position.ud_vol_ratio,
+                'health_score': position.health_score,
+                'health_rating': position.health_rating,
+                'entry_grade': position.entry_grade,
+                'entry_score': position.entry_score,
+                'industry_rank': position.industry_rank,
+                'breakout_vol_pct': position.breakout_vol_pct,
+            }
+            chart_action = menu.addAction("📈 View Chart")
+            chart_action.triggered.connect(
+                lambda checked, pd=_chart_data: self._open_position_chart(pd)
+            )
 
             menu.addSeparator()
             
@@ -2994,11 +3215,19 @@ class KanbanMainWindow(QMainWindow):
         volume = 0
         high = current_price
         low = current_price
-        if polygon_api_key:
+        # Use historical_provider.get_intraday_volume() or fall back to inline PolygonClient
+        _pclient = (self.historical_provider.client
+                     if self.historical_provider and self.historical_provider.is_connected()
+                     else None)
+        if _pclient is None and polygon_api_key:
             try:
                 from canslim_monitor.integrations.polygon_client import PolygonClient
-                pclient = PolygonClient(api_key=polygon_api_key, logger=self.logger)
-                intraday = pclient.get_intraday_volume(position.symbol)
+                _pclient = PolygonClient(api_key=polygon_api_key, logger=self.logger)
+            except Exception:
+                pass
+        if _pclient:
+            try:
+                intraday = _pclient.get_intraday_volume(position.symbol)
                 if intraday:
                     volume = intraday.get('cumulative_volume', 0)
                     if intraday.get('high', 0) > 0:
@@ -3839,22 +4068,23 @@ class KanbanMainWindow(QMainWindow):
                     
                     try:
                         from canslim_monitor.services.volume_service import VolumeService
-                        from canslim_monitor.integrations.polygon_client import PolygonClient
-                        
-                        # Check both market_data and polygon config sections
-                        market_data_config = self.config.get('market_data', {})
-                        polygon_config = self.config.get('polygon', {})
-                        
-                        # Prefer market_data, fall back to polygon
-                        api_key = market_data_config.get('api_key') or polygon_config.get('api_key', '')
-                        base_url = market_data_config.get('base_url') or polygon_config.get('base_url', 'https://api.polygon.io')
-                        
-                        if api_key:
-                            log(f"Using API: {base_url}")
-                            polygon_client = PolygonClient(
-                                api_key=api_key,
-                                base_url=base_url
-                            )
+
+                        # Use historical_provider's client or create inline
+                        polygon_client = None
+                        if self.historical_provider and self.historical_provider.is_connected():
+                            polygon_client = self.historical_provider.client
+                            log(f"Using historical provider client")
+                        else:
+                            from canslim_monitor.integrations.polygon_client import PolygonClient
+                            market_data_config = self.config.get('market_data', {})
+                            polygon_config = self.config.get('polygon', {})
+                            api_key = market_data_config.get('api_key') or polygon_config.get('api_key', '')
+                            base_url = market_data_config.get('base_url') or polygon_config.get('base_url', 'https://api.polygon.io')
+                            if api_key:
+                                polygon_client = PolygonClient(api_key=api_key, base_url=base_url)
+                                log(f"Using API: {base_url}")
+
+                        if polygon_client:
                             volume_service = VolumeService(
                                 db_session_factory=self.db.get_new_session,
                                 polygon_client=polygon_client
@@ -4334,9 +4564,16 @@ class KanbanMainWindow(QMainWindow):
                         polygon_config = self.config.get('polygon', {})
                         api_key = market_data_config.get('api_key') or polygon_config.get('api_key', '')
                         
-                        if api_key:
-                            from canslim_monitor.integrations.polygon_client import PolygonClient
-                            polygon_client = PolygonClient(api_key=api_key)
+                        # Use historical_provider's client or create inline
+                        polygon_client = None
+                        if self.historical_provider and self.historical_provider.is_connected():
+                            polygon_client = self.historical_provider.client
+                        else:
+                            if api_key:
+                                from canslim_monitor.integrations.polygon_client import PolygonClient
+                                polygon_client = PolygonClient(api_key=api_key)
+
+                        if polygon_client:
                             state['volume_service'] = VolumeService(
                                 db_session_factory=self.db.get_new_session,
                                 polygon_client=polygon_client
@@ -4511,7 +4748,9 @@ class KanbanMainWindow(QMainWindow):
             config=self.config,
             db_session_factory=self.db.get_new_session,
             ibkr_client=self.ibkr_client,
-            ibkr_connected=self.ibkr_connected
+            ibkr_connected=self.ibkr_connected,
+            historical_provider=self.historical_provider,
+            realtime_provider=self.realtime_provider,
         )
         self._score_dialog.accepted.connect(self._on_score_dialog_accepted)
 
@@ -4579,7 +4818,21 @@ class KanbanMainWindow(QMainWindow):
             result['entry_score'] = score
             result['entry_grade'] = grade
             result['entry_score_details'] = json.dumps(details)
-            
+
+            # Look up company info from data provider
+            try:
+                from canslim_monitor.providers.factory import ProviderFactory
+                factory = ProviderFactory(self.db_session_factory)
+                hist_provider = factory.get_historical()
+                if hist_provider and hasattr(hist_provider, 'get_ticker_details'):
+                    ticker_info = hist_provider.get_ticker_details(result['symbol'])
+                    if ticker_info:
+                        result['company_name'] = ticker_info.get('name')
+                        result['industry'] = ticker_info.get('industry')
+                        result['sector'] = ticker_info.get('sector')
+            except Exception as e:
+                self.logger.debug(f"Ticker details lookup failed: {e}")
+
             # Create position
             position = repos.positions.create(**result)
             session.commit()
@@ -4693,6 +4946,9 @@ class KanbanMainWindow(QMainWindow):
                 self.service_panel.set_running(True, "IBKR connected")
                 self.status_bar.showMessage("Connected to IBKR TWS - fetching prices...")
 
+                # Wrap IBKR client in provider abstractions
+                self._init_ibkr_providers()
+
                 # Do initial price update
                 self._update_prices()
 
@@ -4770,9 +5026,11 @@ class KanbanMainWindow(QMainWindow):
         self.price_thread = None
         self.price_worker = None
         
-        # Reset client so it gets recreated with fresh config on next start
+        # Reset client and IBKR providers so they get recreated on next start
         self.ibkr_client = None
         self.ibkr_connected = False
+        self.realtime_provider = None
+        self.futures_provider = None
         self.service_panel.set_running(False)
         self.status_bar.showMessage("Service stopped")
     
@@ -4895,18 +5153,35 @@ class KanbanMainWindow(QMainWindow):
             regime_session = self.db.get_new_session()
             self.logger.info("Using main database session for regime analysis")
             
-            dialog.set_progress(25, "Fetching index data from Polygon...")
+            dialog.set_progress(25, "Fetching index data...")
             QApplication.processEvents()
             self.logger.info("Fetching SPY, QQQ, DIA, IWM data...")
-            
-            # Fetch market data for all index ETFs
-            api_config = {'polygon': {'api_key': polygon_key}}
-            data = fetch_index_daily(
-                symbols=['SPY', 'QQQ', 'DIA', 'IWM'],
-                lookback_days=300,  # Need 300 calendar days to get 200+ trading days for SMA
-                config=api_config,
-                use_indices=False
-            )
+
+            # Fetch market data — try historical_provider first, legacy fallback
+            data = {}
+            if self.historical_provider and self.historical_provider.is_connected():
+                try:
+                    from canslim_monitor.regime.historical_data import DailyBar
+                    for sym in ['SPY', 'QQQ', 'DIA', 'IWM']:
+                        bars = self.historical_provider.get_daily_bars(sym, days=300)
+                        if bars:
+                            # Convert canonical Bar → DailyBar for regime components
+                            data[sym] = [DailyBar(date=b.bar_date, open=b.open, high=b.high,
+                                                   low=b.low, close=b.close, volume=b.volume)
+                                         for b in bars]
+                    self.logger.info("Fetched index data via historical provider")
+                except Exception as e:
+                    self.logger.warning(f"Historical provider failed: {e}, trying legacy")
+                    data = {}
+
+            if not data:
+                api_config = {'polygon': {'api_key': polygon_key}}
+                data = fetch_index_daily(
+                    symbols=['SPY', 'QQQ', 'DIA', 'IWM'],
+                    lookback_days=300,
+                    config=api_config,
+                    use_indices=False
+                )
             self.logger.info(f"Fetch complete. Data keys: {list(data.keys()) if data else 'None'}")
             
             spy_bars = data.get('SPY', [])
@@ -5569,14 +5844,18 @@ class KanbanMainWindow(QMainWindow):
 
         try:
             # Import and create service
-            from canslim_monitor.integrations.polygon_client import PolygonClient
             from canslim_monitor.services.earnings_service import EarningsService
 
             progress.setLabelText("Creating API client...")
             progress.setValue(10)
             QApplication.processEvents()
 
-            polygon_client = PolygonClient(api_key=api_key, base_url=base_url)
+            # Use historical_provider's underlying client, or create inline
+            if self.historical_provider and self.historical_provider.is_connected():
+                polygon_client = self.historical_provider.client
+            else:
+                from canslim_monitor.integrations.polygon_client import PolygonClient
+                polygon_client = PolygonClient(api_key=api_key, base_url=base_url)
 
             earnings_service = EarningsService(
                 session_factory=self.db.get_new_session,
@@ -5748,18 +6027,22 @@ class KanbanMainWindow(QMainWindow):
 
         try:
             # Import and create service
-            from canslim_monitor.integrations.polygon_client import PolygonClient
             from canslim_monitor.services.volume_service import VolumeService
 
             progress.setLabelText("Creating API client...")
             progress.setValue(10)
             QApplication.processEvents()
 
-            polygon_client = PolygonClient(
-                api_key=api_key,
-                base_url=base_url,
-                rate_limit_delay=rate_limit_delay
-            )
+            # Use historical_provider's client or create inline
+            if self.historical_provider and self.historical_provider.is_connected():
+                polygon_client = self.historical_provider.client
+            else:
+                from canslim_monitor.integrations.polygon_client import PolygonClient
+                polygon_client = PolygonClient(
+                    api_key=api_key,
+                    base_url=base_url,
+                    rate_limit_delay=rate_limit_delay
+                )
 
             volume_service = VolumeService(
                 db_session_factory=self.db.get_new_session,
@@ -5907,11 +6190,16 @@ class KanbanMainWindow(QMainWindow):
         # Create worker and thread for IBKR fetch (slow operation)
         self.price_update_in_progress = True
 
-        # Get Polygon API key from config for fallback
+        # Get Polygon API key from config for legacy fallback
         polygon_api_key = self.config.get('market_data', {}).get('api_key') if self.config else None
 
         self.price_thread = QThread()
-        self.price_worker = PriceUpdateWorker(self.ibkr_client, symbols, polygon_api_key=polygon_api_key)
+        self.price_worker = PriceUpdateWorker(
+            self.ibkr_client, symbols,
+            polygon_api_key=polygon_api_key,
+            realtime_provider=self.realtime_provider,
+            fallback_provider=self.fallback_provider,
+        )
         self.price_worker.moveToThread(self.price_thread)
         
         # Connect signals
@@ -6079,21 +6367,38 @@ class KanbanMainWindow(QMainWindow):
             self.logger.debug(f"VIX data missing or invalid: {vix_data}")
 
     def _update_futures(self):
-        """Fetch live futures data from IBKR and update banner."""
+        """Fetch live futures data and update banner.
+
+        Tries the futures provider first, falls back to legacy
+        ``get_futures_snapshot(ibkr_client)`` if the provider is unavailable.
+        """
+        # Try futures provider first
+        if self.futures_provider and self.futures_provider.is_connected():
+            try:
+                snap = self.futures_provider.get_futures_snapshot()
+                self.regime_banner.update_futures(
+                    es_pct=snap.es_change_pct,
+                    nq_pct=snap.nq_change_pct,
+                    ym_pct=snap.ym_change_pct,
+                )
+                self.logger.debug(
+                    f"Futures update (provider): ES={snap.es_change_pct:+.2f}%, "
+                    f"NQ={snap.nq_change_pct:+.2f}%, YM={snap.ym_change_pct:+.2f}%"
+                )
+                return
+            except Exception as e:
+                self.logger.warning(f"Futures provider failed: {e}, trying legacy")
+
+        # Legacy fallback
         if not self.ibkr_client or not self.ibkr_client.is_connected():
             return
 
         try:
-            # Import the futures snapshot function
             from canslim_monitor.regime.ibkr_futures import get_futures_snapshot
 
-            # Get futures percentages (ES, NQ, YM) - calculates change from 6 PM Globex open
             es_pct, nq_pct, ym_pct = get_futures_snapshot(self.ibkr_client)
-
-            # Update the banner with live futures data
             self.regime_banner.update_futures(es_pct=es_pct, nq_pct=nq_pct, ym_pct=ym_pct)
-
-            self.logger.debug(f"Futures update: ES={es_pct:+.2f}%, NQ={nq_pct:+.2f}%, YM={ym_pct:+.2f}%")
+            self.logger.debug(f"Futures update (legacy): ES={es_pct:+.2f}%, NQ={nq_pct:+.2f}%, YM={ym_pct:+.2f}%")
 
         except Exception as e:
             self.logger.warning(f"Futures update error: {e}")
@@ -6139,7 +6444,7 @@ class KanbanMainWindow(QMainWindow):
         try:
             # Create the view if it doesn't exist or was closed
             if self._table_view is None:
-                self._table_view = PositionTableView(session, self)
+                self._table_view = PositionTableView(session, parent=None)
                 
                 # Connect the edit signal to handle updates
                 self._table_view.position_edited.connect(self._on_position_edited_from_table)
@@ -6322,6 +6627,35 @@ class KanbanMainWindow(QMainWindow):
             QMessageBox.critical(self, "Chart Error", f"Error opening TradingView chart: {str(e)}")
             self.logger.error(f"TradingView chart error: {e}", exc_info=True)
 
+    def _open_position_chart(self, position_data: dict):
+        """Open dxCharts position chart dialog for a position."""
+        try:
+            from canslim_monitor.gui.chart.position_chart_dialog import (
+                PositionChartDialog, WEBENGINE_AVAILABLE,
+            )
+            if not WEBENGINE_AVAILABLE:
+                QMessageBox.information(
+                    self, "Missing Dependencies",
+                    "Position charts require PyQt6-WebEngine.\n\n"
+                    "Install with: pip install PyQt6-WebEngine"
+                )
+                return
+            if not hasattr(self, '_chart_windows'):
+                self._chart_windows = []
+            dialog = PositionChartDialog(
+                symbol=position_data['symbol'],
+                position_data=position_data,
+                db_session_factory=self.db.get_new_session,
+            )
+            self._chart_windows.append(dialog)
+            dialog.destroyed.connect(
+                lambda _, d=dialog: self._chart_windows.remove(d) if d in self._chart_windows else None
+            )
+            dialog.show()
+        except Exception as e:
+            QMessageBox.critical(self, "Chart Error", f"Error opening chart: {str(e)}")
+            self.logger.error(f"Position chart error: {e}", exc_info=True)
+
     def _on_about(self):
         """Show about dialog."""
         QMessageBox.about(
@@ -6337,15 +6671,34 @@ class KanbanMainWindow(QMainWindow):
     def closeEvent(self, event):
         """Handle window close - clean up resources."""
         self.logger.info("Closing window...")
-        
-        # Stop service if running
+
+        # Close table view if open (independent window)
+        if self._table_view is not None:
+            self._table_view.close()
+            self._table_view = None
+
+        # Stop service if running (disconnects IBKR, clears IBKR providers)
         if self.ibkr_connected or self.ibkr_client:
             self._on_stop_service()
-        
+
+        # Disconnect Massive providers
+        if self.historical_provider:
+            try:
+                self.historical_provider.disconnect()
+            except Exception:
+                pass
+            self.historical_provider = None
+        if self.fallback_provider:
+            try:
+                self.fallback_provider.disconnect()
+            except Exception:
+                pass
+            self.fallback_provider = None
+
         # Clean up database
         if self.db:
             self.db.close()
-        
+
         event.accept()
 
 

@@ -612,6 +612,183 @@ def send_card_message(webhook_url: str, message: str) -> bool:
         return False
 
 
+def generate_trailing_stop_embed(position: MockPosition, price: float, max_price: float) -> dict:
+    """Generate trailing stop alert embed."""
+
+    max_gain_pct = (max_price - position.avg_cost) / position.avg_cost * 100
+    current_pnl = (price - position.avg_cost) / position.avg_cost * 100
+    trailing_stop = max_price * 0.92  # 8% trail
+    gain_locked = ((trailing_stop - position.avg_cost) / position.avg_cost) * 100
+
+    return {
+        "title": f"📉 {position.symbol} - TRAILING STOP HIT",
+        "description": f"{position.symbol} trailing stop triggered after {max_gain_pct:.1f}% max gain",
+        "color": 0xE74C3C,
+        "fields": [
+            {"name": "Price", "value": f"${price:.2f}", "inline": True},
+            {"name": "Trail Stop", "value": f"${trailing_stop:.2f}", "inline": True},
+            {"name": "Max Price", "value": f"${max_price:.2f}", "inline": True},
+            {"name": "Max Gain", "value": f"+{max_gain_pct:.1f}%", "inline": True},
+            {"name": "Current P&L", "value": f"{current_pnl:+.1f}%", "inline": True},
+            {"name": "Gain Locked", "value": f"+{gain_locked:.1f}%", "inline": True},
+            {"name": "▶ Action", "value": "SELL to lock in profits", "inline": False},
+        ],
+        "timestamp": datetime.now().isoformat(),
+        "footer": {"text": "P0 • IMMEDIATE ACTION • CANSLIM Monitor v2.0"},
+    }
+
+
+def generate_tp2_embed(position: MockPosition, price: float) -> dict:
+    """Generate TP2 alert embed."""
+
+    gain_pct = (price - position.avg_cost) / position.avg_cost * 100
+    shares = position.current_shares // 3
+    remaining = position.current_shares - shares
+    profit = shares * (price - position.avg_cost)
+
+    return {
+        "title": f"🏆 {position.symbol} - TP2 TRIGGERED",
+        "description": f"{position.symbol} hit 25% profit target",
+        "color": 0x2ECC71,
+        "fields": [
+            {"name": "Price", "value": f"${price:.2f}", "inline": True},
+            {"name": "Avg Cost", "value": f"${position.avg_cost:.2f}", "inline": True},
+            {"name": "Gain", "value": f"+{gain_pct:.1f}%", "inline": True},
+            {"name": "▶ Action", "value": f"Sell {shares} shares (1/3 of remaining)", "inline": False},
+            {"name": "Remaining", "value": f"{remaining} shares", "inline": True},
+            {"name": "Locked Profit", "value": f"${profit:,.2f}", "inline": True},
+        ],
+        "timestamp": datetime.now().isoformat(),
+        "footer": {"text": "P1 • ACTION NEEDED • CANSLIM Monitor v2.0"},
+    }
+
+
+def generate_ten_week_sell_embed(position: MockPosition, price: float, ma_10_week: float) -> dict:
+    """Generate 10-week MA sell alert embed."""
+
+    return {
+        "title": f"📉 {position.symbol} - 10-WEEK MA SELL",
+        "description": f"{position.symbol} closed below 10-week moving average",
+        "color": 0xE74C3C,
+        "fields": [
+            {"name": "Close", "value": f"${price:.2f}", "inline": True},
+            {"name": "10-Wk MA", "value": f"${ma_10_week:.2f}", "inline": True},
+            {"name": "Below By", "value": f"{((price - ma_10_week) / ma_10_week * 100):.1f}%", "inline": True},
+            {"name": "▶ Action", "value": "SELL - Weekly breakdown", "inline": False},
+        ],
+        "timestamp": datetime.now().isoformat(),
+        "footer": {"text": "P0 • IMMEDIATE ACTION • CANSLIM Monitor v2.0"},
+    }
+
+
+def generate_climax_top_embed(position: MockPosition, price: float) -> dict:
+    """Generate climax top alert embed."""
+
+    gain_pct = (price - position.avg_cost) / position.avg_cost * 100
+
+    return {
+        "title": f"🚨 {position.symbol} - CLIMAX TOP WARNING",
+        "description": f"{position.symbol} showing exhaustion signals after +{gain_pct:.1f}% run",
+        "color": 0xE74C3C,
+        "fields": [
+            {"name": "Price", "value": f"${price:.2f}", "inline": True},
+            {"name": "Gain", "value": f"+{gain_pct:.1f}%", "inline": True},
+            {"name": "Volume", "value": "3.2x avg", "inline": True},
+            {"name": "Signals", "value": "Vol 3.2x | Spread 5.8% | Gap +2.5% | Reversal", "inline": False},
+            {"name": "▶ Action", "value": "Sell 50-100% on climax run", "inline": False},
+        ],
+        "timestamp": datetime.now().isoformat(),
+        "footer": {"text": "P0 • IMMEDIATE ACTION • CANSLIM Monitor v2.0"},
+    }
+
+
+def generate_health_critical_embed(position: MockPosition, price: float, health_score: int) -> dict:
+    """Generate health critical alert embed."""
+
+    pnl_pct = (price - position.avg_cost) / position.avg_cost * 100
+
+    return {
+        "title": f"🚨 {position.symbol} - HEALTH CRITICAL",
+        "description": f"{position.symbol} health score dropped to {health_score}/100",
+        "color": 0xE74C3C,
+        "fields": [
+            {"name": "Price", "value": f"${price:.2f}", "inline": True},
+            {"name": "Health", "value": f"{health_score}/100", "inline": True},
+            {"name": "P&L", "value": f"{pnl_pct:+.1f}%", "inline": True},
+            {"name": "Warnings", "value": "Below 50MA, Low volume, Weak RS", "inline": False},
+            {"name": "▶ Action", "value": "Consider reducing or exiting", "inline": False},
+        ],
+        "timestamp": datetime.now().isoformat(),
+        "footer": {"text": "P0 • IMMEDIATE ACTION • CANSLIM Monitor v2.0"},
+    }
+
+
+def generate_reentry_embed(position: MockPosition, price: float, entry_type: str) -> dict:
+    """Generate re-entry/add opportunity alert embed."""
+
+    pnl_pct = (price - position.avg_cost) / position.avg_cost * 100
+
+    if entry_type == "ema_21":
+        title = f"🎯 {position.symbol} - 21 EMA BOUNCE"
+        line2 = f"21 EMA: ${price * 0.995:.2f} (+0.5%)"
+        action = "Consider add - 21 EMA bounce"
+        color = 0x2ECC71
+    elif entry_type == "ma_50":
+        title = f"🎯 {position.symbol} - 50 MA BOUNCE"
+        line2 = f"50 MA: ${price * 0.998:.2f} (+0.2%)"
+        action = "Add - 50 MA bounce with volume"
+        color = 0x2ECC71
+    else:
+        title = f"🔍 {position.symbol} - PIVOT RETEST"
+        line2 = f"Pivot: ${position.pivot:.2f} (+{((price - position.pivot) / position.pivot * 100):.1f}%)"
+        action = "Consider add - pivot retest"
+        color = 0x2ECC71
+
+    return {
+        "title": title,
+        "description": f"${price:.2f} ({pnl_pct:+.1f}%) | Entry: ${position.avg_cost:.2f}\n"
+                       f"{line2}\n"
+                       f"21 EMA: +1.2% | 50 MA: +3.5%\n"
+                       f"Trend: ↗ Uptrend (25 days)\n\n"
+                       f"▶ **{action}**",
+        "color": color,
+        "footer": {"text": "P2 • MONITOR • 🐂 Bullish"},
+        "timestamp": datetime.now().isoformat(),
+    }
+
+
+def generate_alt_entry_embed(symbol: str, price: float, pivot: float, entry_type: str) -> dict:
+    """Generate watchlist alt entry alert embed."""
+
+    pct_from_pivot = ((price - pivot) / pivot) * 100
+
+    if entry_type == "ema_21":
+        title = f"🎯 ALT ENTRY - 21 EMA: {symbol}"
+        line2 = f"21 EMA: ${price * 1.005:.2f} (-0.5%) | Test #1 (HIGH)"
+        action = "BUY - 21 EMA pullback (Test #1)"
+    elif entry_type == "ma_50":
+        title = f"🎯 ALT ENTRY - 50 MA: {symbol}"
+        line2 = f"50 MA: ${price * 1.01:.2f} (-1.0%) | Test #1 (HIGH)"
+        action = "BUY - 50 MA pullback (Test #1)"
+    else:
+        title = f"🔄 ALT ENTRY - PIVOT RETEST: {symbol}"
+        buy_zone_top = pivot * 1.05
+        line2 = f"Pivot: ${pivot:.2f} ({pct_from_pivot:+.1f}%) | Zone: ${pivot:.2f}-${buy_zone_top:.2f}"
+        action = "BUY - Pivot retest entry"
+
+    return {
+        "title": title,
+        "description": f"${price:.2f} (+0.0%) | Entry: ${pivot:.2f}\n"
+                       f"{line2}\n"
+                       f"21 EMA: +1.0% | 50 MA: +3.0%\n"
+                       f"Trend: ↗ Uptrend\n\n"
+                       f"▶ **{action}**",
+        "color": 0x2ECC71,
+        "footer": {"text": "P1 • ACTION NEEDED • 🐂 Bullish"},
+        "timestamp": datetime.now().isoformat(),
+    }
+
+
 def generate_market_embed(status: str, spy_price: float, d_days: int, subtype: str) -> dict:
     """Generate market alert embed."""
     
@@ -654,17 +831,39 @@ def run_demo(webhook_url: str):
     print("="*60)
     
     alerts_to_send = [
+        # Breakout alerts
         ("Breakout Confirmed", generate_breakout_embed(SAMPLE_POSITIONS["NVDA"], 147.25, 2.3)),
         ("Breakout Suppressed", generate_breakout_embed(SAMPLE_POSITIONS["NVDA"], 146.00, 0.8)),
+        # Pyramid alerts
         ("Pyramid 1 Ready", generate_pyramid_embed(SAMPLE_POSITIONS["AAPL"], 190.12, 1)),
         ("Pyramid 2 Ready", generate_pyramid_embed(SAMPLE_POSITIONS["AAPL"], 194.78, 2)),
+        # Profit alerts
         ("TP1 Triggered", generate_tp1_embed(SAMPLE_POSITIONS["MSFT"], 498.30)),
+        ("TP2 Triggered", generate_tp2_embed(SAMPLE_POSITIONS["MSFT"], 519.06)),
         ("TP1 Suppressed (8WK)", generate_tp1_embed(SAMPLE_POSITIONS["GOOGL"], 205.00)),
+        # Stop alerts
         ("Stop Warning", generate_stop_embed(SAMPLE_POSITIONS["AAPL"], 174.50, is_warning=True)),
         ("Hard Stop Hit", generate_stop_embed(SAMPLE_POSITIONS["AAPL"], 171.00, is_warning=False)),
+        ("Trailing Stop Hit", generate_trailing_stop_embed(SAMPLE_POSITIONS["GOOGL"], 190.00, 210.00)),
+        # Technical alerts
         ("50 MA Sell", generate_ma_sell_embed(SAMPLE_POSITIONS["MSFT"], 398.00, 405.50, "50_MA")),
+        ("21 EMA Sell", generate_ma_sell_embed(SAMPLE_POSITIONS["GOOGL"], 195.00, 198.50, "21_EMA")),
+        ("10-Week MA Sell", generate_ten_week_sell_embed(SAMPLE_POSITIONS["MSFT"], 400.00, 408.00)),
+        ("Climax Top", generate_climax_top_embed(SAMPLE_POSITIONS["GOOGL"], 215.00)),
+        # Health alerts
+        ("Health Critical", generate_health_critical_embed(SAMPLE_POSITIONS["AAPL"], 178.00, 35)),
+        # Re-entry/Add alerts
+        ("21 EMA Bounce (Add)", generate_reentry_embed(SAMPLE_POSITIONS["AAPL"], 195.00, "ema_21")),
+        ("50 MA Bounce (Add)", generate_reentry_embed(SAMPLE_POSITIONS["AAPL"], 198.00, "ma_50")),
+        ("Pivot Retest (Add)", generate_reentry_embed(SAMPLE_POSITIONS["AAPL"], 186.00, "pivot")),
+        # Alt Entry alerts (watchlist)
+        ("Alt Entry 21 EMA", generate_alt_entry_embed("CRWD", 418.00, 416.25, "ema_21")),
+        ("Alt Entry 50 MA", generate_alt_entry_embed("CRWD", 420.00, 416.25, "ma_50")),
+        ("Alt Entry Pivot Retest", generate_alt_entry_embed("NOW", 1108.00, 1105.00, "pivot")),
+        # Market alerts
         ("Market Correction", generate_market_embed("CORRECTION", 485.20, 5, "CORRECTION")),
         ("Follow-Through Day", generate_market_embed("CONFIRMED_UPTREND", 495.80, 0, "FTD")),
+        ("Market Weak", generate_market_embed("WEAK", 490.50, 3, "WEAK")),
     ]
     
     print(f"\nSending {len(alerts_to_send)} sample alerts...\n")
@@ -812,15 +1011,38 @@ def run_single_alert(webhook_url: str, alert_type: str):
         return
     
     embeds = {
+        # Breakout
         "breakout": generate_breakout_embed(SAMPLE_POSITIONS["NVDA"], 147.25, 2.3),
+        # Pyramid
         "pyramid": generate_pyramid_embed(SAMPLE_POSITIONS["AAPL"], 190.12, 1),
+        "pyramid2": generate_pyramid_embed(SAMPLE_POSITIONS["AAPL"], 194.78, 2),
+        # Profit
         "tp1": generate_tp1_embed(SAMPLE_POSITIONS["MSFT"], 498.30),
+        "tp2": generate_tp2_embed(SAMPLE_POSITIONS["MSFT"], 519.06),
         "8week": generate_tp1_embed(SAMPLE_POSITIONS["GOOGL"], 205.00),
+        # Stop
         "stop": generate_stop_embed(SAMPLE_POSITIONS["AAPL"], 171.00),
         "warning": generate_stop_embed(SAMPLE_POSITIONS["AAPL"], 174.50, is_warning=True),
+        "trailing": generate_trailing_stop_embed(SAMPLE_POSITIONS["GOOGL"], 190.00, 210.00),
+        # Technical
         "ma_sell": generate_ma_sell_embed(SAMPLE_POSITIONS["MSFT"], 398.00, 405.50, "50_MA"),
+        "ema_sell": generate_ma_sell_embed(SAMPLE_POSITIONS["GOOGL"], 195.00, 198.50, "21_EMA"),
+        "10week": generate_ten_week_sell_embed(SAMPLE_POSITIONS["MSFT"], 400.00, 408.00),
+        "climax": generate_climax_top_embed(SAMPLE_POSITIONS["GOOGL"], 215.00),
+        # Health
+        "health": generate_health_critical_embed(SAMPLE_POSITIONS["AAPL"], 178.00, 35),
+        # Re-entry/Add
+        "ema_bounce": generate_reentry_embed(SAMPLE_POSITIONS["AAPL"], 195.00, "ema_21"),
+        "ma_bounce": generate_reentry_embed(SAMPLE_POSITIONS["AAPL"], 198.00, "ma_50"),
+        "pivot_retest": generate_reentry_embed(SAMPLE_POSITIONS["AAPL"], 186.00, "pivot"),
+        # Alt Entry (watchlist)
+        "alt_ema": generate_alt_entry_embed("CRWD", 418.00, 416.25, "ema_21"),
+        "alt_50ma": generate_alt_entry_embed("CRWD", 420.00, 416.25, "ma_50"),
+        "alt_pivot": generate_alt_entry_embed("NOW", 1108.00, 1105.00, "pivot"),
+        # Market
         "market": generate_market_embed("CORRECTION", 485.20, 5, "CORRECTION"),
         "ftd": generate_market_embed("CONFIRMED_UPTREND", 495.80, 0, "FTD"),
+        "weak": generate_market_embed("WEAK", 490.50, 3, "WEAK"),
     }
     
     if alert_type not in embeds:

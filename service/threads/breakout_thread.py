@@ -93,6 +93,8 @@ class BreakoutThread(BaseThread):
         # Dynamic scoring dependencies
         volume_service: Optional['VolumeService'] = None,
         canslim_scorer: Optional['CANSLIMScorer'] = None,
+        # Provider abstraction layer (Phase 6)
+        realtime_provider=None,
     ):
         super().__init__(
             name="breakout",
@@ -114,6 +116,9 @@ class BreakoutThread(BaseThread):
         # Dynamic scoring dependencies
         self.volume_service = volume_service
         self.canslim_scorer = canslim_scorer
+
+        # Provider abstraction layer — prefers provider over raw client
+        self.realtime_provider = realtime_provider
         
         # Cache for SPY data (for RS Trend calculation)
         self._spy_df_cache = None
@@ -977,10 +982,19 @@ class BreakoutThread(BaseThread):
             self.logger.error(f"Failed to send Discord alert: {e}")
     
     def _get_price_data(self, symbol: str) -> Optional[Dict]:
-        """Get current price data from IBKR."""
+        """Get current price data from realtime provider (or IBKR fallback)."""
+        # Prefer provider abstraction — returns canonical Quote → dict
+        if self.realtime_provider and self.realtime_provider.is_connected():
+            try:
+                quote = self.realtime_provider.get_quote(symbol)
+                if quote:
+                    return quote.to_dict()
+            except Exception as e:
+                self.logger.debug(f"Provider get_quote({symbol}) failed: {e}, falling back to raw client")
+
         if not self.ibkr_client:
             return None
-        
+
         try:
             # Try to use the enriched method that includes MAs
             if hasattr(self.ibkr_client, 'get_quote_with_technicals'):

@@ -50,6 +50,8 @@ class MaintenanceThread(BaseThread):
         polygon_client=None,
         config: Dict[str, Any] = None,
         logger: Optional[logging.Logger] = None,
+        # Provider abstraction layer (Phase 6)
+        historical_provider=None,
     ):
         super().__init__(
             name="maintenance",
@@ -59,7 +61,10 @@ class MaintenanceThread(BaseThread):
         )
 
         self.db_session_factory = db_session_factory
+        # Prefer historical_provider's underlying client over direct polygon_client
         self.polygon_client = polygon_client
+        if historical_provider and hasattr(historical_provider, 'client'):
+            self.polygon_client = historical_provider.client
         self.config = config or {}
 
         # Configuration
@@ -97,8 +102,8 @@ class MaintenanceThread(BaseThread):
         et_tz = pytz.timezone('America/New_York')
         now_et = datetime.now(et_tz)
 
-        # Don't run on weekends
-        if now_et.weekday() >= 5:
+        # Don't run on weekends or holidays
+        if not self._is_trading_day():
             return False
 
         # Check if already ran today

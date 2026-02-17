@@ -73,14 +73,19 @@ class ServiceController:
         self.discord_notifier = None
         self.db_session_factory = None
         self.config = {}
+        self.market_calendar = None
         
         # Phase 2 components
         self.scoring_engine = None
         self.position_sizer = None
         self.alert_service = None
 
-        # Market data client (Polygon/Massive)
-        self.polygon_client = None
+        # Market data — provider abstraction layer
+        self.provider_factory = None
+        self.historical_provider = None
+        self.realtime_provider = None
+        self.futures_provider = None
+        self.polygon_client = None  # Legacy compat — backed by historical_provider.client
 
         # Tracking
         self._start_time: Optional[datetime] = None
@@ -102,10 +107,11 @@ class ServiceController:
         self._load_config()
         
         # Initialize shared resources
+        self._init_market_calendar()
         self._init_database()
         self._init_ibkr()
         self._init_discord()
-        self._init_polygon()
+        self._init_providers()
 
         # Initialize Phase 2 components
         self._init_scoring_engine()
@@ -168,6 +174,19 @@ class ServiceController:
             self.logger.error(f"Failed to load config: {e}")
             self.config = {}
     
+    def _init_market_calendar(self):
+        """Initialize shared MarketCalendar with Polygon API key."""
+        try:
+            from ..utils.market_calendar import init_market_calendar
+            api_key = self.config.get('polygon', {}).get('api_key', '')
+            self.market_calendar = init_market_calendar(api_key=api_key)
+            self.logger.info(
+                "MarketCalendar initialized (api_key=%s)",
+                'set' if api_key else 'none — using fallback calendar'
+            )
+        except Exception as e:
+            self.logger.warning(f"MarketCalendar init failed: {e}")
+
     def _init_database(self):
         """Initialize database connection."""
         if not self.db_path:
@@ -322,44 +341,75 @@ class ServiceController:
         except Exception as e:
             self.logger.error(f"Failed to initialize Discord: {e}")
 
-    def _init_polygon(self):
-        """Initialize Polygon/Massive API client for market data."""
-        # Support both new (market_data) and legacy (polygon) config sections
-        market_data_config = self.config.get('market_data', {})
-        polygon_config = self.config.get('polygon', {})
+    def _init_providers(self):
+        """Initialize data providers via the provider abstraction layer.
 
-        # Prefer market_data, fall back to polygon
-        api_key = market_data_config.get('api_key') or polygon_config.get('api_key', '')
-        base_url = (
-            market_data_config.get('base_url') or
-            polygon_config.get('base_url', 'https://api.polygon.io')
-        )
-        # Use faster rate limit for paid tiers (Stocks Starter has unlimited)
-        rate_limit_delay = market_data_config.get('rate_limit_delay', 0.1)
+        Reads provider configuration from the database.  On first run (no
+        rows in ``provider_config``), seeds the DB from the YAML config so
+        that existing setups migrate automatically.
 
-        if not api_key:
-            self.logger.warning("No Polygon/Massive API key configured - volume updates disabled")
+        After this method the following are available:
+        - ``self.historical_provider`` (new API) + ``self.polygon_client`` (legacy)
+        - ``self.realtime_provider`` (wraps existing ibkr_client)
+        - ``self.futures_provider`` (wraps existing ibkr_client)
+        """
+        if not self.db_session_factory:
+            self.logger.warning("Provider init skipped — no database")
             return
 
         try:
-            from ..integrations.polygon_client import PolygonClient
+            from ..providers import ProviderFactory
 
-            self.polygon_client = PolygonClient(
-                api_key=api_key,
-                base_url=base_url,
-                rate_limit_delay=rate_limit_delay,
-                logger=self.logger.getChild('polygon')
-            )
+            self.provider_factory = ProviderFactory(self.db_session_factory)
 
-            # Determine provider for logging
-            provider = 'polygon'
-            if 'massive' in base_url.lower():
-                provider = 'massive'
+            # Seed from YAML if provider_config table is empty
+            session = self.db_session_factory()
+            try:
+                from ..data.models import ProviderConfig
+                count = session.query(ProviderConfig).count()
+            finally:
+                session.close()
 
-            self.logger.info(f"{provider.upper()} API client initialized (rate_limit={rate_limit_delay}s)")
+            if count == 0:
+                self.logger.info("No provider config in DB — seeding from YAML")
+                self.provider_factory.seed_from_yaml(self.config)
+
+            # Create historical provider (Massive / Polygon)
+            self.historical_provider = self.provider_factory.get_historical()
+
+            if self.historical_provider:
+                # Expose underlying PolygonClient for legacy consumers
+                # (VolumeService, MaintenanceThread, EarningsService, TechnicalDataService)
+                self.polygon_client = self.historical_provider.client
+                self.logger.info(
+                    "Historical provider '%s' ready (health=%s)",
+                    self.historical_provider.name,
+                    self.historical_provider.health.status.value,
+                )
+            else:
+                self.logger.warning(
+                    "No historical provider available — volume/earnings updates disabled"
+                )
+
+            # Wrap the existing IBKR client in provider abstractions.
+            # This avoids creating a second IBKR connection — the providers
+            # simply delegate to the already-connected ibkr_client.
+            if self.ibkr_client:
+                try:
+                    from ..providers.ibkr import IBKRRealtimeProvider, IBKRFuturesProvider
+
+                    self.realtime_provider = IBKRRealtimeProvider(
+                        ibkr_client=self.ibkr_client,
+                    )
+                    self.futures_provider = IBKRFuturesProvider(
+                        ibkr_client=self.ibkr_client,
+                    )
+                    self.logger.info("IBKR realtime + futures providers created (shared client)")
+                except Exception as e:
+                    self.logger.warning(f"Could not create IBKR providers: {e}")
 
         except Exception as e:
-            self.logger.error(f"Failed to initialize Polygon client: {e}")
+            self.logger.error(f"Failed to initialize providers: {e}", exc_info=True)
 
     def _init_scoring_engine(self):
         """Initialize the scoring engine for setup evaluation."""
@@ -460,9 +510,11 @@ class ServiceController:
             alert_service=self.alert_service,
             # Volume service for intraday fallback
             volume_service=volume_service,
+            # Provider abstraction layer (Phase 6)
+            realtime_provider=self.realtime_provider,
             logger=get_logger('breakout')  # Use configured logger
         )
-        
+
         self.threads['position'] = PositionThread(
             shutdown_event=self.shutdown_event,
             poll_interval=thread_config.get('position_interval', 30),
@@ -470,13 +522,15 @@ class ServiceController:
             ibkr_client=self.ibkr_client,
             discord_notifier=self.discord_notifier,
             config=self.config,  # Pass full config for position_monitoring section
+            # Provider abstraction layer (Phase 6)
+            realtime_provider=self.realtime_provider,
             logger=get_logger('position')  # Use configured logger
         )
-        
+
         # Use comprehensive RegimeThread (ported from MarketRegime-MonitorSystem)
         # Lazy import to avoid circular dependency
         from ..regime.regime_thread import RegimeThread
-        
+
         self.threads['regime'] = RegimeThread(
             shutdown_event=self.shutdown_event,
             poll_interval=thread_config.get('regime_interval', 300),
@@ -484,23 +538,33 @@ class ServiceController:
             ibkr_client=self.ibkr_client,
             discord_notifier=self.discord_notifier,
             config=self.config,
+            # Provider abstraction layer (Phase 6)
+            historical_provider=self.historical_provider,
+            futures_provider=self.futures_provider,
             logger=get_logger('regime')  # Use configured logger
         )
 
         # Maintenance thread for nightly updates (volume, earnings, cleanup)
-        if self.polygon_client:
+        if self.polygon_client or self.historical_provider:
             self.threads['maintenance'] = MaintenanceThread(
                 shutdown_event=self.shutdown_event,
                 poll_interval=thread_config.get('maintenance_interval', 300),  # Check every 5 min
                 db_session_factory=self.db_session_factory,
                 polygon_client=self.polygon_client,
                 config=self.config,
+                # Provider abstraction layer (Phase 6)
+                historical_provider=self.historical_provider,
                 logger=get_logger('maintenance')
             )
         else:
             self.logger.warning("Maintenance thread disabled - no Polygon client")
 
-        self.logger.info(f"Created {len(self.threads)} threads")
+        # Inject shared MarketCalendar into all threads for holiday awareness
+        if self.market_calendar:
+            for thread in self.threads.values():
+                thread._market_calendar = self.market_calendar
+
+        self.logger.info(f"Created {len(self.threads)} threads (market_calendar={'yes' if self.market_calendar else 'no'})")
     
     def _start_ipc_server(self):
         """Start the IPC server for GUI communication."""
@@ -646,6 +710,14 @@ class ServiceController:
     
     def _cleanup(self):
         """Clean up resources on shutdown."""
+        # Disconnect providers (historical, and future realtime/futures)
+        if self.provider_factory:
+            try:
+                self.provider_factory.disconnect_all()
+                self.logger.info("Providers disconnected")
+            except Exception as e:
+                self.logger.warning(f"Error disconnecting providers: {e}")
+
         # Disconnect IBKR
         if self.ibkr_client:
             try:
@@ -661,7 +733,7 @@ class ServiceController:
                         self.logger.info("IBKR disconnected")
             except Exception as e:
                 self.logger.warning(f"Error disconnecting IBKR: {e}")
-        
+
         self.logger.debug("Cleanup complete")
     
     @property

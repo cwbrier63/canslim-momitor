@@ -40,13 +40,16 @@ class ScorePreviewDialog(QDialog):
     }
 
     def __init__(self, parent=None, config: Dict[str, Any] = None, db_session_factory=None,
-                 ibkr_client=None, ibkr_connected: bool = False):
+                 ibkr_client=None, ibkr_connected: bool = False,
+                 historical_provider=None, realtime_provider=None):
         super().__init__(parent)
         self._scorer = None
         self._config = config or {}
         self._db_session_factory = db_session_factory
         self._ibkr_client = ibkr_client
         self._ibkr_connected = ibkr_connected
+        self._historical_provider = historical_provider
+        self._realtime_provider = realtime_provider
         self._details = None  # Score details dict
         self._score = 0
         self._grade = 'F'
@@ -503,25 +506,26 @@ class ScorePreviewDialog(QDialog):
         """
         try:
             from canslim_monitor.services.volume_service import VolumeService
-            from canslim_monitor.integrations.polygon_client import PolygonClient
 
-            # Get API key from config - check multiple possible locations
-            market_data_config = self._config.get('market_data', {})
-            polygon_config = self._config.get('polygon', {})
+            # Use historical_provider's client or create inline
+            polygon_client = None
+            if self._historical_provider and self._historical_provider.is_connected():
+                polygon_client = self._historical_provider.client
+                logger.info("Using historical provider for scoring data")
+            else:
+                from canslim_monitor.integrations.polygon_client import PolygonClient
+                market_data_config = self._config.get('market_data', {})
+                polygon_config = self._config.get('polygon', {})
+                api_key = market_data_config.get('api_key') or polygon_config.get('api_key', '')
+                base_url = market_data_config.get('base_url') or polygon_config.get('base_url', 'https://api.polygon.io')
 
-            api_key = market_data_config.get('api_key') or polygon_config.get('api_key', '')
-            base_url = market_data_config.get('base_url') or polygon_config.get('base_url', 'https://api.polygon.io')
+                logger.info(f"API key found: {'yes (' + api_key[:8] + '...)' if api_key else 'NO - dynamic scoring disabled'}")
 
-            logger.info(f"Config keys: {list(self._config.keys())}")
-            logger.info(f"market_data config present: {'yes' if market_data_config else 'no'}")
-            logger.info(f"API key found: {'yes (' + api_key[:8] + '...)' if api_key else 'NO - dynamic scoring disabled'}")
+                if not api_key:
+                    logger.warning("No API key configured in market_data or polygon config sections")
+                    return None, None, 0
 
-            if not api_key:
-                logger.warning("No API key configured in market_data or polygon config sections")
-                return None, None, 0
-
-            # Create clients
-            polygon_client = PolygonClient(api_key=api_key, base_url=base_url)
+                polygon_client = PolygonClient(api_key=api_key, base_url=base_url)
 
             # Use passed session factory or create DatabaseManager with proper path
             if self._db_session_factory:
@@ -583,24 +587,23 @@ class ScorePreviewDialog(QDialog):
             date object or None if not found
         """
         try:
-            from canslim_monitor.integrations.polygon_client import PolygonClient
-
-            # Get API key from config
-            market_data_config = self._config.get('market_data', {})
-            polygon_config = self._config.get('polygon', {})
-
-            api_key = market_data_config.get('api_key') or polygon_config.get('api_key', '')
-            base_url = market_data_config.get('base_url') or polygon_config.get('base_url', 'https://api.polygon.io')
-
-            if not api_key:
-                logger.debug("No API key for earnings lookup")
-                return None
-
             self.status_label.setText("Checking earnings...")
             QApplication.processEvents()
 
-            polygon_client = PolygonClient(api_key=api_key, base_url=base_url)
-            earnings_date = polygon_client.get_next_earnings_date(symbol)
+            # Try historical_provider first (has get_next_earnings_date pass-through)
+            if self._historical_provider and self._historical_provider.is_connected():
+                earnings_date = self._historical_provider.get_next_earnings_date(symbol)
+            else:
+                from canslim_monitor.integrations.polygon_client import PolygonClient
+                market_data_config = self._config.get('market_data', {})
+                polygon_config = self._config.get('polygon', {})
+                api_key = market_data_config.get('api_key') or polygon_config.get('api_key', '')
+                base_url = market_data_config.get('base_url') or polygon_config.get('base_url', 'https://api.polygon.io')
+                if not api_key:
+                    logger.debug("No API key for earnings lookup")
+                    return None
+                polygon_client = PolygonClient(api_key=api_key, base_url=base_url)
+                earnings_date = polygon_client.get_next_earnings_date(symbol)
 
             if earnings_date:
                 logger.info(f"{symbol}: Next earnings date {earnings_date}")
@@ -682,9 +685,28 @@ class ScorePreviewDialog(QDialog):
         bid_price = None
         ask_price = None
 
-        if self._ibkr_connected and self._ibkr_client and symbol:
+        # Try realtime provider first, then raw IBKR client
+        _got_spread = False
+        if self._realtime_provider and self._realtime_provider.is_connected() and symbol:
             try:
-                # Fetch quote for this symbol
+                quote = self._realtime_provider.get_quote(symbol)
+                if quote and quote.bid and quote.ask and quote.bid > 0:
+                    bid_price = quote.bid
+                    ask_price = quote.ask
+                    spread_pct = ((ask_price - bid_price) / bid_price) * 100
+                    spread_available = True
+                    if spread_pct <= 0.10:
+                        spread_status = "TIGHT"
+                    elif spread_pct <= 0.30:
+                        spread_status = "NORMAL"
+                    else:
+                        spread_status = "WIDE"
+                    _got_spread = True
+            except Exception as e:
+                logger.debug(f"Realtime provider spread fetch failed: {e}")
+
+        if not _got_spread and self._ibkr_connected and self._ibkr_client and symbol:
+            try:
                 quotes = self._ibkr_client.get_quotes([symbol])
                 if quotes and symbol in quotes:
                     quote_data = quotes[symbol]

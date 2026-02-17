@@ -59,19 +59,18 @@ class MarketThread(BaseThread):
         """
         Market thread can run slightly outside market hours
         to capture close data and pre-market conditions.
+        Skips weekends and holidays.
         """
+        if not self._is_trading_day():
+            return False
+
         from datetime import datetime
         try:
             import pytz
-            et = pytz.timezone('US/Eastern')
-            now = datetime.now(et)
+            now = datetime.now(pytz.timezone('US/Eastern'))
         except ImportError:
             now = datetime.now()
-        
-        # Skip weekends
-        if now.weekday() >= 5:
-            return False
-        
+
         # Extended hours: 8 AM to 6 PM ET
         return 8 <= now.hour <= 18
     

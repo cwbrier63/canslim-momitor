@@ -771,144 +771,6 @@ class DateFilterPopup(QDialog):
         self.close()
 
 
-class ColumnFilterButton(QPushButton):
-    """Button that shows filter status and opens filter popup."""
-    
-    filter_changed = pyqtSignal(int, object)  # column_index, filter_value
-    
-    def __init__(self, column_index: int, column_key: str, column_name: str, parent=None):
-        super().__init__(parent)
-        self.column_index = column_index
-        self.column_key = column_key
-        self.column_name = column_name
-        self.column_type = COLUMN_TYPES.get(column_key, 'text')
-        
-        self.current_filter = None
-        self.unique_values: List[str] = []
-        
-        self._update_appearance()
-        self.clicked.connect(self._show_popup)
-    
-    def _update_appearance(self):
-        """Update button appearance based on filter state."""
-        if self.current_filter:
-            self.setText("▼")
-            self.setStyleSheet("""
-                QPushButton {
-                    background-color: #0078D4;
-                    color: white;
-                    border: none;
-                    border-radius: 2px;
-                    font-size: 9px;
-                    font-weight: bold;
-                }
-                QPushButton:hover {
-                    background-color: #106EBE;
-                }
-            """)
-            
-            # Build tooltip showing active filter
-            if isinstance(self.current_filter, set):
-                count = len(self.current_filter)
-                tip = f"{self.column_name}: {count} value(s) selected"
-            elif isinstance(self.current_filter, dict):
-                op = self.current_filter.get('operator', '')
-                val = self.current_filter.get('value', 0)
-                if op == 'between':
-                    val2 = self.current_filter.get('value2', 0)
-                    tip = f"{self.column_name}: {val} to {val2}"
-                else:
-                    tip = f"{self.column_name}: {op} {val}"
-            else:
-                tip = f"{self.column_name}: Filter active"
-            self.setToolTip(tip)
-        else:
-            self.setText("▼")
-            self.setStyleSheet("""
-                QPushButton {
-                    background-color: transparent;
-                    color: #888888;
-                    border: none;
-                    font-size: 9px;
-                }
-                QPushButton:hover {
-                    background-color: #E0E0E0;
-                    color: #333333;
-                    border-radius: 2px;
-                }
-            """)
-            self.setToolTip(f"Filter {self.column_name}")
-    
-    def set_unique_values(self, values: List[str]):
-        """Set the unique values for text filter popup."""
-        self.unique_values = values
-    
-    def _show_popup(self):
-        """Show the appropriate filter popup."""
-        if self.column_type in ('int', 'float'):
-            popup = NumericFilterPopup(
-                self.column_type,
-                self.current_filter if isinstance(self.current_filter, dict) else None,
-                self
-            )
-            popup.filter_changed.connect(self._on_numeric_filter)
-        elif self.column_type == 'date':
-            popup = DateFilterPopup(
-                self.current_filter if isinstance(self.current_filter, dict) else None,
-                self
-            )
-            popup.filter_changed.connect(self._on_date_filter)
-        else:
-            # Text filter
-            selected = self.current_filter if isinstance(self.current_filter, set) else set()
-            popup = TextFilterPopup(
-                self.unique_values,
-                selected,
-                self
-            )
-            popup.filter_changed.connect(self._on_text_filter)
-
-        # Position popup below the button
-        pos = self.mapToGlobal(QPoint(0, self.height()))
-        popup.move(pos)
-        popup.show()
-    
-    def _on_text_filter(self, selected_values: Set[str]):
-        """Handle text filter selection."""
-        if len(selected_values) == len(self.unique_values) or len(selected_values) == 0:
-            self.current_filter = None
-        else:
-            self.current_filter = selected_values
-        
-        self._update_appearance()
-        self.filter_changed.emit(self.column_index, self.current_filter)
-    
-    def _on_numeric_filter(self, filter_dict: Dict):
-        """Handle numeric filter selection."""
-        if not filter_dict:
-            self.current_filter = None
-        else:
-            self.current_filter = filter_dict
-
-        self._update_appearance()
-        self.filter_changed.emit(self.column_index, self.current_filter)
-
-    def _on_date_filter(self, filter_dict: Dict):
-        """Handle date filter selection."""
-        if not filter_dict:
-            self.current_filter = None
-        else:
-            self.current_filter = filter_dict
-
-        self._update_appearance()
-        self.filter_changed.emit(self.column_index, self.current_filter)
-
-    def clear_filter(self):
-        """Clear the filter."""
-        self.current_filter = None
-        self._update_appearance()
-
-
 class PositionTableModel(QAbstractTableModel):
     """Table model for displaying positions in a spreadsheet view."""
     
@@ -967,6 +829,16 @@ class PositionTableModel(QAbstractTableModel):
         self._data: List[Dict[str, Any]] = []
         self._column_keys = [col[0] for col in self.COLUMNS]
         self._column_names = [col[1] for col in self.COLUMNS]
+        self._filtered_columns: Set[int] = set()
+
+    def set_filtered_columns(self, columns: Set[int]):
+        """Update which columns have active filters (for header indicator)."""
+        if columns != self._filtered_columns:
+            self._filtered_columns = columns
+            # Emit headerDataChanged for all columns to refresh indicators
+            self.headerDataChanged.emit(
+                Qt.Orientation.Horizontal, 0, len(self.COLUMNS) - 1
+            )
     
     def load_positions(self, positions: List[Dict[str, Any]]):
         """Load position data into the model."""
@@ -1068,9 +940,15 @@ class PositionTableModel(QAbstractTableModel):
     def headerData(self, section: int, orientation: Qt.Orientation, role: int = Qt.ItemDataRole.DisplayRole):
         if role == Qt.ItemDataRole.DisplayRole:
             if orientation == Qt.Orientation.Horizontal:
-                return self._column_names[section]
+                name = self._column_names[section]
+                if section in self._filtered_columns:
+                    return f"{name} \u25BC"
+                return name
             else:
                 return section + 1
+        elif role == Qt.ItemDataRole.ForegroundRole:
+            if orientation == Qt.Orientation.Horizontal and section in self._filtered_columns:
+                return QBrush(QColor(100, 180, 255))  # Blue tint for filtered columns
         return None
     
     def get_position_data(self, row: int) -> Optional[Dict[str, Any]]:
@@ -1220,7 +1098,7 @@ class PositionTableView(QDialog):
         super().__init__(parent)
         self.db_session = db_session
         self._position_id_map: Dict[int, int] = {}
-        self._filter_buttons: Dict[int, ColumnFilterButton] = {}
+        self._column_filters: Dict[int, Any] = {}  # column_index -> filter value (set or dict)
         self._config_path = config_path or self.DEFAULT_CONFIG_PATH
 
         # View state: tracks hidden columns, column order, widths, and sorting
@@ -1377,7 +1255,7 @@ class PositionTableView(QDialog):
         quick_filter_layout.addStretch()
         
         # Info label
-        info_label = QLabel("💡 Click ▼ to filter | Right-click headers to show/hide columns | Drag to reorder")
+        info_label = QLabel("Right-click column headers to sort, filter & manage columns")
         info_label.setStyleSheet("color: #888888; font-style: italic;")
         quick_filter_layout.addWidget(info_label)
         
@@ -1396,24 +1274,6 @@ class PositionTableView(QDialog):
         self.proxy_model = AdvancedFilterProxyModel()
         self.proxy_model.setSourceModel(self.table_model)
         self.proxy_model.setSortCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
-        
-        # Filter buttons row
-        self.filter_row = QWidget()
-        self.filter_row.setFixedHeight(24)
-        self.filter_row.setStyleSheet("background-color: #3C3C3F;")
-        filter_row_layout = QHBoxLayout(self.filter_row)
-        filter_row_layout.setContentsMargins(0, 0, 0, 0)
-        filter_row_layout.setSpacing(0)
-        
-        for i, (key, name) in enumerate(PositionTableModel.COLUMNS):
-            btn = ColumnFilterButton(i, key, name)
-            btn.setFixedHeight(22)
-            btn.filter_changed.connect(self._on_column_filter_changed)
-            self._filter_buttons[i] = btn
-            filter_row_layout.addWidget(btn)
-        
-        filter_row_layout.addStretch()
-        layout.addWidget(self.filter_row)
         
         # Table view
         self.table_view = QTableView()
@@ -1453,10 +1313,6 @@ class PositionTableView(QDialog):
             if i < len(PositionTableModel.COLUMNS):
                 header.resizeSection(i, width)
                 self._column_widths[i] = width
-        
-        # Sync filter button widths with columns
-        self.table_view.horizontalHeader().sectionResized.connect(self._sync_filter_widths)
-        QTimer.singleShot(100, self._sync_filter_widths)
         
         # Style
         self.table_view.setStyleSheet("""
@@ -1510,38 +1366,6 @@ class PositionTableView(QDialog):
         button_layout.addWidget(close_btn)
         
         layout.addLayout(button_layout)
-    
-    def _sync_filter_widths(self):
-        """Sync filter button widths and positions with table column widths and visual order."""
-        header = self.table_view.horizontalHeader()
-
-        # Get the filter row layout
-        layout = self.filter_row.layout()
-        if not layout:
-            return
-
-        # Build visual order: list of logical indices in visual order
-        visual_order = []
-        for visual_index in range(header.count()):
-            logical_index = header.logicalIndex(visual_index)
-            visual_order.append(logical_index)
-
-        # Remove all widgets from layout (but keep references)
-        while layout.count():
-            item = layout.takeAt(0)
-            # Don't delete the widget, just remove from layout
-
-        # Re-add buttons in visual order with correct widths
-        for visual_index, logical_index in enumerate(visual_order):
-            btn = self._filter_buttons.get(logical_index)
-            if btn:
-                is_hidden = header.isSectionHidden(logical_index)
-                btn.setVisible(not is_hidden)
-                btn.setFixedWidth(header.sectionSize(logical_index))
-                layout.addWidget(btn)
-
-        # Add stretch at end
-        layout.addStretch()
     
     def _load_data(self):
         """Load all positions from database."""
@@ -1648,12 +1472,6 @@ class PositionTableView(QDialog):
                 self._position_id_map[i] = pos.id
             
             self.table_model.load_positions(position_data)
-            
-            # Update filter buttons with unique values
-            for i, btn in self._filter_buttons.items():
-                if COLUMN_TYPES.get(btn.column_key) not in ('int', 'float'):
-                    btn.set_unique_values(self.table_model.get_unique_values(i))
-            
             self._update_count()
             
         except Exception as e:
@@ -1672,15 +1490,12 @@ class PositionTableView(QDialog):
         self.proxy_model.set_state_filter(state)
         self._update_count()
     
-    def _on_column_filter_changed(self, column: int, filter_value):
-        self.proxy_model.set_column_filter(column, filter_value)
-        self._update_count()
-    
     def _clear_filters(self):
+        """Clear all column filters and state filter."""
         self.state_filter_combo.setCurrentIndex(0)
-        for btn in self._filter_buttons.values():
-            btn.clear_filter()
+        self._column_filters.clear()
         self.proxy_model.clear_filters()
+        self._update_filter_indicators()
         self._update_count()
     
     def _on_double_click(self, index: QModelIndex):
@@ -2081,25 +1896,30 @@ class PositionTableView(QDialog):
             Earnings date if found, None otherwise
         """
         try:
-            from canslim_monitor.integrations.polygon_client import PolygonClient
+            # Try historical_provider from parent window first
+            historical_provider = None
+            if self.parent() and hasattr(self.parent(), 'historical_provider'):
+                historical_provider = self.parent().historical_provider
 
-            # Get config from parent if available
-            config = {}
-            if self.parent() and hasattr(self.parent(), 'config'):
-                config = self.parent().config
+            if historical_provider and historical_provider.is_connected():
+                earnings_date = historical_provider.get_next_earnings_date(position.symbol)
+            else:
+                from canslim_monitor.integrations.polygon_client import PolygonClient
 
-            market_data_config = config.get('market_data', {})
-            polygon_config = config.get('polygon', {})
+                config = {}
+                if self.parent() and hasattr(self.parent(), 'config'):
+                    config = self.parent().config
 
-            api_key = market_data_config.get('api_key') or polygon_config.get('api_key', '')
-            base_url = market_data_config.get('base_url') or polygon_config.get('base_url', 'https://api.polygon.io')
+                market_data_config = config.get('market_data', {})
+                polygon_config = config.get('polygon', {})
+                api_key = market_data_config.get('api_key') or polygon_config.get('api_key', '')
+                base_url = market_data_config.get('base_url') or polygon_config.get('base_url', 'https://api.polygon.io')
 
-            if not api_key:
-                return None
+                if not api_key:
+                    return None
 
-            # Fetch earnings date (tries Polygon, then Yahoo Finance)
-            polygon_client = PolygonClient(api_key=api_key, base_url=base_url)
-            earnings_date = polygon_client.get_next_earnings_date(position.symbol)
+                polygon_client = PolygonClient(api_key=api_key, base_url=base_url)
+                earnings_date = polygon_client.get_next_earnings_date(position.symbol)
 
             if earnings_date:
                 # Update position in database
@@ -2291,7 +2111,16 @@ class PositionTableView(QDialog):
     # ========== View State Management (Phase 1 Custom Views) ==========
 
     def _on_header_context_menu(self, pos: QPoint):
-        """Show context menu for column management."""
+        """Show Excel-like context menu for column sort, filter, and management."""
+        header = self.table_view.horizontalHeader()
+        logical_index = header.logicalIndexAt(pos.x())
+
+        if logical_index < 0 or logical_index >= len(PositionTableModel.COLUMNS):
+            return
+
+        col_key, col_name = PositionTableModel.COLUMNS[logical_index]
+        col_type = COLUMN_TYPES.get(col_key, 'text')
+
         menu = QMenu(self)
         menu.setStyleSheet("""
             QMenu {
@@ -2306,6 +2135,9 @@ class PositionTableView(QDialog):
             QMenu::item:selected {
                 background-color: #0078D4;
             }
+            QMenu::item:disabled {
+                color: #666666;
+            }
             QMenu::separator {
                 height: 1px;
                 background-color: #4A4A4D;
@@ -2313,17 +2145,134 @@ class PositionTableView(QDialog):
             }
         """)
 
-        # Select columns action (opens dialog)
-        select_cols_action = menu.addAction("📋 Select Columns...")
-        select_cols_action.triggered.connect(self._open_column_visibility_dialog)
+        # Sort actions - type-appropriate labels
+        if col_type in ('int', 'float'):
+            sort_asc = menu.addAction("Sort Smallest \u2192 Largest")
+            sort_desc = menu.addAction("Sort Largest \u2192 Smallest")
+        elif col_type == 'date':
+            sort_asc = menu.addAction("Sort Oldest \u2192 Newest")
+            sort_desc = menu.addAction("Sort Newest \u2192 Oldest")
+        else:
+            sort_asc = menu.addAction("Sort A \u2192 Z")
+            sort_desc = menu.addAction("Sort Z \u2192 A")
+
+        sort_asc.triggered.connect(
+            lambda checked, idx=logical_index: self.table_view.sortByColumn(idx, Qt.SortOrder.AscendingOrder))
+        sort_desc.triggered.connect(
+            lambda checked, idx=logical_index: self.table_view.sortByColumn(idx, Qt.SortOrder.DescendingOrder))
 
         menu.addSeparator()
 
-        # Reset column order
-        reset_action = menu.addAction("↺ Reset Column Order")
+        # Filter actions
+        filter_action = menu.addAction("Filter...")
+        filter_action.triggered.connect(
+            lambda checked, idx=logical_index: self._show_column_filter(idx))
+
+        clear_filter_action = menu.addAction("Clear Filter")
+        has_filter = logical_index in self._column_filters
+        clear_filter_action.setEnabled(has_filter)
+        clear_filter_action.triggered.connect(
+            lambda checked, idx=logical_index: self._clear_column_filter(idx))
+
+        clear_all_action = menu.addAction("Clear All Filters")
+        clear_all_action.setEnabled(len(self._column_filters) > 0)
+        clear_all_action.triggered.connect(self._clear_filters)
+
+        menu.addSeparator()
+
+        # Column management
+        hide_action = menu.addAction("Hide Column")
+        hide_action.triggered.connect(
+            lambda checked, idx=logical_index: self._toggle_column_visibility(idx, False))
+
+        select_cols_action = menu.addAction("Select Columns...")
+        select_cols_action.triggered.connect(self._open_column_visibility_dialog)
+
+        reset_action = menu.addAction("Reset Column Order")
         reset_action.triggered.connect(self._reset_column_order)
 
-        menu.exec(self.table_view.horizontalHeader().mapToGlobal(pos))
+        menu.exec(header.mapToGlobal(pos))
+
+    def _show_column_filter(self, logical_index: int):
+        """Show the appropriate filter popup for a column, positioned below the header."""
+        col_key = PositionTableModel.COLUMNS[logical_index][0]
+        col_type = COLUMN_TYPES.get(col_key, 'text')
+
+        header = self.table_view.horizontalHeader()
+
+        # Calculate popup position below the column header
+        section_pos = header.sectionPosition(logical_index) - header.offset()
+        global_pos = header.mapToGlobal(QPoint(section_pos, header.height()))
+
+        if col_type in ('int', 'float'):
+            current = self._column_filters.get(logical_index)
+            if not isinstance(current, dict):
+                current = None
+            popup = NumericFilterPopup(col_type, current, self)
+            popup.filter_changed.connect(
+                lambda f, idx=logical_index: self._on_numeric_filter_from_menu(idx, f))
+        elif col_type == 'date':
+            current = self._column_filters.get(logical_index)
+            if not isinstance(current, dict):
+                current = None
+            popup = DateFilterPopup(current, self)
+            popup.filter_changed.connect(
+                lambda f, idx=logical_index: self._on_date_filter_from_menu(idx, f))
+        else:
+            selected = self._column_filters.get(logical_index)
+            if not isinstance(selected, set):
+                selected = set()
+            unique_values = self.table_model.get_unique_values(logical_index)
+            popup = TextFilterPopup(unique_values, selected, self)
+            popup.filter_changed.connect(
+                lambda f, idx=logical_index: self._on_text_filter_from_menu(idx, f))
+
+        popup.move(global_pos)
+        popup.show()
+
+    def _on_text_filter_from_menu(self, column: int, selected_values: set):
+        """Handle text filter applied from context menu popup."""
+        unique_values = self.table_model.get_unique_values(column)
+        if len(selected_values) == len(unique_values) or len(selected_values) == 0:
+            self._clear_column_filter(column)
+        else:
+            self._column_filters[column] = selected_values
+            self.proxy_model.set_column_filter(column, selected_values)
+            self._update_filter_indicators()
+            self._update_count()
+
+    def _on_numeric_filter_from_menu(self, column: int, filter_dict: dict):
+        """Handle numeric filter applied from context menu popup."""
+        if not filter_dict:
+            self._clear_column_filter(column)
+        else:
+            self._column_filters[column] = filter_dict
+            self.proxy_model.set_column_filter(column, filter_dict)
+            self._update_filter_indicators()
+            self._update_count()
+
+    def _on_date_filter_from_menu(self, column: int, filter_dict: dict):
+        """Handle date filter applied from context menu popup."""
+        if not filter_dict:
+            self._clear_column_filter(column)
+        else:
+            filter_dict['type'] = 'date'
+            self._column_filters[column] = filter_dict
+            self.proxy_model.set_column_filter(column, filter_dict)
+            self._update_filter_indicators()
+            self._update_count()
+
+    def _clear_column_filter(self, column: int):
+        """Clear filter for a single column."""
+        if column in self._column_filters:
+            del self._column_filters[column]
+        self.proxy_model.set_column_filter(column, None)
+        self._update_filter_indicators()
+        self._update_count()
+
+    def _update_filter_indicators(self):
+        """Update the model's filtered columns set for header display."""
+        self.table_model.set_filtered_columns(set(self._column_filters.keys()))
 
     def _open_column_visibility_dialog(self):
         """Open the column visibility selection dialog."""
@@ -2346,12 +2295,9 @@ class PositionTableView(QDialog):
         for i in range(header.count()):
             should_hide = i in hidden_columns
             header.setSectionHidden(i, should_hide)
-            if i in self._filter_buttons:
-                self._filter_buttons[i].setVisible(not should_hide)
 
         # Update stored state
         self._hidden_columns = hidden_columns
-        self._sync_filter_widths()
         self._save_view_state()
 
     def _toggle_column_visibility(self, logical_index: int, visible: bool):
@@ -2365,11 +2311,6 @@ class PositionTableView(QDialog):
         else:
             self._hidden_columns.add(logical_index)
 
-        # Update filter button visibility
-        if logical_index in self._filter_buttons:
-            self._filter_buttons[logical_index].setVisible(visible)
-
-        self._sync_filter_widths()
         self._save_view_state()
 
     def _reset_column_order(self):
@@ -2384,7 +2325,6 @@ class PositionTableView(QDialog):
                 header.moveSection(current_visual_index, default_visual_index)
 
         self._column_order = list(range(len(PositionTableModel.COLUMNS)))
-        self._sync_filter_widths()
         self._save_view_state()
 
     def _on_column_moved(self, logical_index: int, old_visual: int, new_visual: int):
@@ -2392,7 +2332,6 @@ class PositionTableView(QDialog):
         # Update column order by reading current visual order
         header = self.table_view.horizontalHeader()
         self._column_order = [header.logicalIndex(visual) for visual in range(header.count())]
-        self._sync_filter_widths()
         self._save_view_state()
 
     def _load_view_state(self):
@@ -2534,8 +2473,6 @@ class PositionTableView(QDialog):
         # First, show all columns (reset hidden state)
         for i in range(header.count()):
             header.setSectionHidden(i, False)
-            if i in self._filter_buttons:
-                self._filter_buttons[i].setVisible(True)
 
         # Apply column order (move columns to saved positions)
         for visual_index, logical_index in enumerate(self._column_order):
@@ -2551,8 +2488,6 @@ class PositionTableView(QDialog):
         # Apply hidden columns
         for logical_index in self._hidden_columns:
             header.setSectionHidden(logical_index, True)
-            if logical_index in self._filter_buttons:
-                self._filter_buttons[logical_index].setVisible(False)
 
         # Apply sorting
         if self._sort_columns:
@@ -2561,9 +2496,7 @@ class PositionTableView(QDialog):
             order = Qt.SortOrder.AscendingOrder if ascending else Qt.SortOrder.DescendingOrder
             self.table_view.sortByColumn(col_idx, order)
 
-        # Sync filter widths after applying state
         self._loading_view = False
-        QTimer.singleShot(100, self._sync_filter_widths)
 
     def _on_view_changed(self, view_name: str):
         """Handle view selection change."""

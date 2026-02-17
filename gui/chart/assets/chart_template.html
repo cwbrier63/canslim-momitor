@@ -1,0 +1,1908 @@
+<!DOCTYPE html>
+<html lang="en-US">
+<head>
+<meta charset="utf-8">
+<style>
+  html, body {
+    margin: 0; padding: 0; width: 100%; height: 100%;
+    background: #1a1a2e; overflow: hidden; font-family: Consolas, monospace;
+  }
+  #chart-wrapper { display: flex; flex-direction: column; width: 100%; height: 100%; }
+  #main-chart-area { position: relative; flex: 1; min-height: 200px; }
+  #chart-container { width: 100%; height: 100%; position: relative; z-index: 1; }
+  #sub-panels-container { flex-shrink: 0; }
+  #overlay-canvas {
+    position: absolute; top: 0; left: 0;
+    pointer-events: none; z-index: 5;
+  }
+  .sub-panel {
+    position: relative; height: 120px; background: #1a1a2e;
+    border-top: 1px solid #333;
+  }
+  .sub-panel-canvas {
+    position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+  }
+  .panel-label {
+    position: absolute; top: 4px; left: 8px; z-index: 10;
+    color: #888; font-size: 10px;
+  }
+  .panel-close-btn {
+    position: absolute; top: 2px; right: 8px; z-index: 10;
+    background: none; border: none; color: #888; cursor: pointer;
+    font-size: 14px; font-family: Consolas, monospace; padding: 2px 6px;
+  }
+  .panel-close-btn:hover { color: #ef5350; }
+  #nav-panel {
+    position: absolute; bottom: 6px; right: 70px; z-index: 150;
+    display: flex; gap: 5px; align-items: center;
+    pointer-events: auto;
+  }
+  #nav-panel button {
+    background: #3a3a6e; color: #e0e0f0; border: 1px solid #666;
+    border-radius: 4px; padding: 4px 10px; cursor: pointer;
+    font-size: 13px; font-weight: bold; font-family: Consolas, monospace;
+    min-width: 32px; text-align: center;
+    pointer-events: auto;
+  }
+  #nav-panel button:hover { background: #5050a0; border-color: #888; color: #fff; }
+  #nav-panel button:active { background: #6060c0; }
+  .indicator-picker {
+    position: absolute; top: 38px; left: 8px; z-index: 200;
+    background: #2a2a4e; border: 1px solid #555; border-radius: 6px;
+    padding: 10px; width: 240px; max-height: 400px; overflow-y: auto;
+    display: none;
+  }
+  .indicator-picker label {
+    display: flex; align-items: center; gap: 6px; padding: 3px 0;
+    color: #d1d4dc; font-size: 12px; cursor: pointer;
+  }
+  .indicator-picker .cat-header {
+    color: #888; font-size: 10px; margin-top: 8px; margin-bottom: 4px;
+    text-transform: uppercase;
+  }
+  .indicator-picker .badge {
+    font-size: 9px; color: #888; margin-left: auto;
+  }
+  #toolbar {
+    position: absolute; top: 8px; left: 8px; z-index: 100;
+    display: flex; gap: 6px; align-items: center;
+    flex-wrap: wrap;
+  }
+  #toolbar .symbol-label {
+    color: #d1d4dc; font-size: 16px; font-weight: bold;
+    margin-right: 8px;
+  }
+  #toolbar button {
+    background: #2a2a4e; color: #d1d4dc; border: 1px solid #444;
+    border-radius: 4px; padding: 4px 10px; cursor: pointer;
+    font-size: 12px; font-family: Consolas, monospace;
+  }
+  #toolbar button:hover { background: #3a3a6e; }
+  #toolbar button.active { background: #4a4a8e; border-color: #7070ff; }
+  #overlay-section {
+    display: none; margin-left: 16px; gap: 6px;
+    align-items: center;
+  }
+  .separator {
+    width: 1px; height: 20px; background: #444; margin: 0 4px;
+  }
+  #source-label {
+    position: absolute; bottom: 28px; right: 12px; z-index: 100;
+    color: #555; font-size: 10px;
+  }
+  #candle-tooltip {
+    display: none; position: absolute; z-index: 200;
+    background: #2a2a4e; border: 1px solid #666; border-radius: 5px;
+    padding: 8px 10px; pointer-events: none;
+    font: 11px Consolas, monospace; color: #d1d4dc;
+    white-space: nowrap; box-shadow: 0 2px 8px rgba(0,0,0,0.5);
+  }
+  #candle-tooltip .tt-date { color: #888; margin-bottom: 4px; }
+  #candle-tooltip .tt-row { display: flex; justify-content: space-between; gap: 12px; }
+  #candle-tooltip .tt-label { color: #888; }
+  #candle-tooltip .tt-up { color: #26a69a; }
+  #candle-tooltip .tt-down { color: #ef5350; }
+</style>
+</head>
+<body>
+<div id="toolbar">
+  <span class="symbol-label" id="symbol-label">---</span>
+  <!-- Resolution buttons -->
+  <button onclick="requestTimeframe('week')" id="btn-tf-w">W</button>
+  <button onclick="requestTimeframe('day')" id="btn-tf-d" class="active">D</button>
+  <button onclick="requestTimeframe('hour')" id="btn-tf-1h">1H</button>
+  <button onclick="requestTimeframe('30min')" id="btn-tf-30m">30m</button>
+  <div class="separator"></div>
+  <!-- Range buttons -->
+  <button onclick="setRange(63)" id="btn-3m">3M</button>
+  <button onclick="setRange(126)" id="btn-6m">6M</button>
+  <button onclick="setRange(252)" class="active" id="btn-1y">1Y</button>
+  <div id="rth-section" style="display:none; gap:6px; align-items:center;">
+    <div class="separator"></div>
+    <button onclick="toggleRTH()" id="btn-rth" class="active" title="Regular Trading Hours only">RTH</button>
+  </div>
+  <div id="overlay-section">
+    <div class="separator"></div>
+    <button onclick="toggleLevels()" id="btn-levels" class="active">Levels</button>
+    <button onclick="toggleMAs()" id="btn-mas" class="active">MAs</button>
+    <button onclick="toggleMarkers()" id="btn-markers" class="active">Trades</button>
+    <button onclick="toggleScorecard()" id="btn-scorecard" class="active">Score</button>
+    <div class="separator"></div>
+    <button onclick="toggleIndicatorPicker()" id="btn-indicators">Indicators</button>
+  </div>
+</div>
+<div id="chart-wrapper">
+  <div id="main-chart-area">
+    <div id="chart-container"></div>
+    <canvas id="overlay-canvas"></canvas>
+    <div id="candle-tooltip"></div>
+    <div id="nav-panel">
+      <button onclick="navBack()" title="Back one screen">&laquo;</button>
+      <button onclick="navAutofit()" title="Autofit visible data">A</button>
+      <button onclick="navEnd()" title="Jump to latest">&raquo;</button>
+    </div>
+  </div>
+  <div id="sub-panels-container"></div>
+</div>
+<span id="source-label"></span>
+<script src="dxchart.min.js"></script>
+<script>
+/* ===== Global State ===== */
+var chart = null;
+var allCandles = [];
+var levelLines = {};
+var priceZones = {};
+var maLines = {};
+var tradeMarkers = [];
+var levelsVisible = true;
+var masVisible = true;
+var markersVisible = true;
+var overlayCanvas, overlayCtx;
+var overlayRunning = false;
+var currentTimeframe = 'day';
+var scorecardData = null;
+var scorecardVisible = true;
+var indicatorCatalog = {};     // id -> {name, panel, category}
+var overlayIndicators = {};    // id -> {display_name, series, visible}
+var subPanels = {};            // id -> {config, canvas, ctx, series, yRange, visible}
+var indicatorPickerOpen = false;
+var pandas_ta_available = false;
+var allCandlesRaw = [];        // unfiltered candle array (includes ETH)
+var rthOnly = true;            // true = Regular Trading Hours only, false = all (ETH)
+var canFetchMore = false;      // whether more historical data is available
+var fetchingMore = false;      // currently loading more history
+var fetchMoreCooldown = false; // debounce guard
+
+/* ===== Date Formatting ===== */
+var MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+
+function _formatDateLabel(timestamp) {
+    var d = new Date(timestamp);
+    if (currentTimeframe === 'hour' || currentTimeframe === '30min') {
+        var h = d.getUTCHours(); var m = d.getUTCMinutes();
+        var hStr = h < 10 ? '0' + h : '' + h;
+        var mStr = m < 10 ? '0' + m : '' + m;
+        return MONTHS[d.getUTCMonth()] + ' ' + d.getUTCDate() + ' ' + hStr + ':' + mStr;
+    }
+    if (currentTimeframe === 'week') {
+        return MONTHS[d.getUTCMonth()] + ' ' + d.getUTCDate() + ', ' + d.getUTCFullYear();
+    }
+    // Daily
+    return MONTHS[d.getUTCMonth()] + ' ' + d.getUTCDate();
+}
+
+function _formatDateShort(timestamp, prevTimestamp) {
+    var d = new Date(timestamp);
+    if (currentTimeframe === 'hour' || currentTimeframe === '30min') {
+        // Intraday: show time, but show date at day boundaries
+        if (prevTimestamp) {
+            var pd = new Date(prevTimestamp);
+            if (pd.getUTCDate() !== d.getUTCDate() || pd.getUTCMonth() !== d.getUTCMonth()) {
+                return MONTHS[d.getUTCMonth()] + ' ' + d.getUTCDate();
+            }
+        }
+        var h = d.getUTCHours(); var m = d.getUTCMinutes();
+        return (h < 10 ? '0' : '') + h + ':' + (m < 10 ? '0' : '') + m;
+    }
+    // Daily / Weekly: boundary-based labels
+    if (prevTimestamp) {
+        var pd = new Date(prevTimestamp);
+        // Year boundary → show full year
+        if (pd.getUTCFullYear() !== d.getUTCFullYear()) {
+            return '' + d.getUTCFullYear();
+        }
+        // Month boundary → show abbreviated month
+        if (pd.getUTCMonth() !== d.getUTCMonth()) {
+            return MONTHS[d.getUTCMonth()];
+        }
+    } else {
+        // First label: show month
+        return MONTHS[d.getUTCMonth()];
+    }
+    // Same month → just the day number
+    return '' + d.getUTCDate();
+}
+
+/* ===== Phase 1: Core Chart ===== */
+
+function initChart() {
+    var container = document.getElementById('chart-container');
+    chart = DXChart.createChart(container, {
+        components: {
+            chart: {
+                type: 'candle',
+                showWicks: true,
+                showCandlesBorder: false,
+                highlightActiveCandle: true,
+            },
+            volumes: { visible: true },
+            crossTool: { type: 'cross-and-labels' },
+            yAxis: {
+                visible: true,
+                type: 'regular',
+                align: 'right',
+                customScale: true,
+                customScaleDblClick: true,
+            },
+            xAxis: { visible: false },
+            grid: {
+                visible: true,
+                vertical: true,
+                horizontal: true,
+            },
+            offsets: { top: 10, bottom: 34, right: 5 },
+            waterMark: { visible: false },
+            navigationMap: { visible: false },
+        },
+        colors: {
+            candleTheme: {
+                upColor: '#26a69a',
+                downColor: '#ef5350',
+                upWickColor: '#26a69a',
+                downWickColor: '#ef5350',
+            },
+            chartAreaTheme: {
+                backgroundColor: '#1a1a2e',
+                backgroundMode: 'solid',
+                gridColor: 'rgba(255, 255, 255, 0.06)',
+            },
+            crossTool: {
+                lineColor: 'rgba(255, 255, 255, 0.3)',
+                labelBoxColor: '#2a2a4e',
+                labelTextColor: '#d1d4dc',
+            },
+            yAxis: {
+                backgroundColor: '#1a1a2e',
+                labelTextColor: '#868993',
+            },
+            xAxis: {
+                backgroundColor: '#1a1a2e',
+                labelTextColor: '#868993',
+            },
+        },
+        scale: {
+            auto: true,
+            autoScaleOnCandles: true,
+            zoomToCursor: true,
+        },
+    });
+
+    // Try to set custom x-axis date formatter (dxCharts-lite API)
+    try {
+        if (chart.xAxis && chart.xAxis.setFormatterFactory) {
+            chart.xAxis.setFormatterFactory(function() {
+                return function(ts) { return _formatDateShort(ts); };
+            });
+        }
+    } catch(e) { /* formatter not supported in this build */ }
+
+    // Setup overlay canvas
+    overlayCanvas = document.getElementById('overlay-canvas');
+    overlayCtx = overlayCanvas.getContext('2d');
+    _resizeOverlay();
+
+    var mainArea = document.getElementById('main-chart-area');
+    new ResizeObserver(function() { _resizeOverlay(); _resizeMainChart(); }).observe(mainArea);
+
+    // Candle tooltip: show on mousedown, hide on mouseup
+    var chartEl = document.getElementById('chart-container');
+    chartEl.addEventListener('mousedown', _onChartClick);
+    chartEl.addEventListener('mouseup', _hideTooltip);
+    chartEl.addEventListener('mouseleave', _hideTooltip);
+    chartEl.addEventListener('wheel', _hideTooltip);
+}
+
+function _resizeOverlay() {
+    var mainArea = document.getElementById('main-chart-area');
+    var w = mainArea.clientWidth;
+    var h = mainArea.clientHeight;
+    var dpr = window.devicePixelRatio || 1;
+    overlayCanvas.width = w * dpr;
+    overlayCanvas.height = h * dpr;
+    overlayCanvas.style.width = w + 'px';
+    overlayCanvas.style.height = h + 'px';
+    overlayCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+
+function _startOverlayLoop() {
+    if (overlayRunning) return;
+    overlayRunning = true;
+    function frame() {
+        _drawAllOverlays();
+        requestAnimationFrame(frame);
+    }
+    requestAnimationFrame(frame);
+}
+
+function setSymbolLabel(symbol) {
+    document.getElementById('symbol-label').textContent = symbol;
+}
+
+function setSourceLabel(text) {
+    document.getElementById('source-label').textContent = text;
+}
+
+function setTimeframe(tf) {
+    currentTimeframe = tf;
+    // Update resolution button active states
+    ['btn-tf-w', 'btn-tf-d', 'btn-tf-1h', 'btn-tf-30m'].forEach(function(id) {
+        document.getElementById(id).classList.remove('active');
+    });
+    var tfBtnMap = { 'week': 'btn-tf-w', 'day': 'btn-tf-d', 'hour': 'btn-tf-1h', '30min': 'btn-tf-30m' };
+    var btnId = tfBtnMap[tf];
+    if (btnId) document.getElementById(btnId).classList.add('active');
+    // Show RTH/ETH toggle only on intraday timeframes
+    var rthSection = document.getElementById('rth-section');
+    rthSection.style.display = (tf === 'hour' || tf === '30min') ? 'flex' : 'none';
+}
+
+function requestTimeframe(tf) {
+    // Signal Python to reload data at this timeframe via title change
+    document.title = 'TF:' + tf;
+}
+
+function setCandles(candlesJson, preserveViewport) {
+    try {
+        allCandlesRaw = JSON.parse(candlesJson);
+    } catch (e) {
+        console.error('Failed to parse candles JSON:', e);
+        return;
+    }
+
+    // Save viewport timestamps before replacing data
+    var savedFirst = null, savedLast = null;
+    if (preserveViewport) {
+        var vr = _getVisibleRange();
+        if (vr) {
+            savedFirst = allCandles[vr.first] ? allCandles[vr.first].timestamp : null;
+            savedLast = allCandles[vr.last] ? allCandles[vr.last].timestamp : null;
+        }
+    }
+
+    // Apply RTH filter for intraday
+    allCandles = _applySessionFilter(allCandlesRaw);
+    if (chart && allCandles.length > 0) {
+        var symbol = document.getElementById('symbol-label').textContent;
+        chart.setData({
+            candles: allCandles,
+            instrument: { symbol: symbol, priceIncrements: [0.01] },
+        });
+        _startOverlayLoop();
+
+        // Restore viewport position after history prepend
+        if (preserveViewport && savedFirst !== null && savedLast !== null) {
+            _restoreViewport(savedFirst, savedLast);
+        }
+    }
+}
+
+function _restoreViewport(firstTs, lastTs) {
+    // Find candle indices for the saved timestamps
+    var startIdx = -1, endIdx = -1;
+    for (var i = 0; i < allCandles.length; i++) {
+        if (startIdx < 0 && allCandles[i].timestamp >= firstTs) startIdx = i;
+        if (allCandles[i].timestamp <= lastTs) endIdx = i;
+    }
+    if (startIdx >= 0 && endIdx > startIdx) {
+        _setViewport(startIdx, endIdx);
+    }
+}
+
+function _applySessionFilter(candles) {
+    if (!rthOnly || (currentTimeframe !== 'hour' && currentTimeframe !== '30min')) {
+        return candles;
+    }
+    return candles.filter(function(c) { return c.rth !== false; });
+}
+
+function clearOverlays() {
+    levelLines = {};
+    priceZones = {};
+    maLines = {};
+    tradeMarkers = [];
+    overlayIndicators = {};
+    // Clear sub-panel series but keep panels alive (they persist across TF changes)
+    Object.keys(subPanels).forEach(function(pid) { subPanels[pid].series = {}; });
+}
+
+function setRange(tradingDays) {
+    if (!chart || allCandles.length === 0) return;
+    // Update active range button
+    ['btn-3m', 'btn-6m', 'btn-1y'].forEach(function(id) {
+        document.getElementById(id).classList.remove('active');
+    });
+    var btnMap = { 63: 'btn-3m', 126: 'btn-6m', 252: 'btn-1y' };
+    var btnId = btnMap[tradingDays];
+    if (btnId) document.getElementById(btnId).classList.add('active');
+
+    var endIdx = allCandles.length - 1;
+    var startIdx = Math.max(0, endIdx - tradingDays);
+    try {
+        if (chart.data && chart.data.setTimestampRange) {
+            chart.data.setTimestampRange(
+                allCandles[startIdx].timestamp,
+                allCandles[endIdx].timestamp
+            );
+        } else if (chart.scale && chart.scale.setXScale) {
+            chart.scale.setXScale(startIdx, endIdx);
+        }
+    } catch (e) {
+        console.warn('setRange error:', e);
+    }
+}
+
+/* ===== Navigation Controls ===== */
+
+function _getVisibleRange() {
+    // Find first and last visible candle indices
+    var bounds = _getBounds();
+    if (!bounds) return null;
+    var first = -1, last = -1;
+    for (var i = 0; i < allCandles.length; i++) {
+        var x = _toX(allCandles[i].timestamp);
+        if (x !== null && x >= bounds.x && x <= bounds.x + bounds.width) {
+            if (first < 0) first = i;
+            last = i;
+        }
+    }
+    if (first < 0) return null;
+    return { first: first, last: last, count: last - first + 1 };
+}
+
+function _setViewport(startIdx, endIdx) {
+    startIdx = Math.max(0, startIdx);
+    endIdx = Math.min(allCandles.length - 1, endIdx);
+    if (startIdx >= endIdx) return;
+    try {
+        if (chart.data && chart.data.setTimestampRange) {
+            chart.data.setTimestampRange(
+                allCandles[startIdx].timestamp,
+                allCandles[endIdx].timestamp
+            );
+        } else if (chart.scale && chart.scale.setXScale) {
+            chart.scale.setXScale(startIdx, endIdx);
+        }
+    } catch (e) {}
+}
+
+function navBack() {
+    if (!chart || allCandles.length === 0) return;
+    var r = _getVisibleRange();
+    if (!r) return;
+    var shift = Math.max(1, Math.floor(r.count * 0.8));
+    var newFirst = r.first - shift;
+    var newLast = newFirst + r.count - 1;
+    _setViewport(newFirst, newLast);
+    _checkFetchMore();
+}
+
+function navEnd() {
+    if (!chart || allCandles.length === 0) return;
+    var r = _getVisibleRange();
+    var span = r ? r.count : 252;
+    var endIdx = allCandles.length - 1;
+    _setViewport(endIdx - span + 1, endIdx);
+}
+
+function navAutofit() {
+    if (!chart || allCandles.length === 0) return;
+    // Auto-scale Y axis to fit visible data on current screen
+    var r = _getVisibleRange();
+    if (!r) return;
+    // Re-set same viewport to trigger dxCharts autoScaleOnCandles
+    _setViewport(r.first, r.last);
+    // Also try explicit auto-scale APIs
+    try {
+        if (chart.scale && chart.scale.autoScale) chart.scale.autoScale();
+        else if (chart.scale && chart.scale.doAutoScale) chart.scale.doAutoScale(true);
+        else if (chart.chartModel && chart.chartModel.doAutoScale) chart.chartModel.doAutoScale();
+    } catch (e) {}
+}
+
+/* ===== Lazy-Load History ===== */
+
+function setCanFetchMore(val) { canFetchMore = val; }
+function setFetchingMore(val) { fetchingMore = val; }
+
+function _checkFetchMore() {
+    // Trigger fetch when the user scrolls near the left edge of loaded data
+    if (!canFetchMore || fetchingMore || fetchMoreCooldown) return;
+    if (currentTimeframe !== 'hour' && currentTimeframe !== '30min') return;
+    var r = _getVisibleRange();
+    if (!r) return;
+    // If leftmost visible candle is within first 5 candles, fetch more
+    if (r.first <= 5) {
+        fetchMoreCooldown = true;
+        document.title = 'FETCH_MORE';
+        // Cooldown: don't re-trigger for 2 seconds
+        setTimeout(function() { fetchMoreCooldown = false; }, 2000);
+    }
+}
+
+/* ===== Candle Tooltip ===== */
+
+function _onChartClick(e) {
+    if (!chart || allCandles.length === 0) return;
+    var bounds = _getBounds();
+    if (!bounds) return;
+
+    var rect = e.currentTarget.getBoundingClientRect();
+    var clickX = e.clientX - rect.left;
+    var clickY = e.clientY - rect.top;
+
+    // Outside chart area — hide
+    if (clickX < bounds.x || clickX > bounds.x + bounds.width ||
+        clickY < bounds.y || clickY > bounds.y + bounds.height) {
+        _hideTooltip();
+        return;
+    }
+
+    // Find nearest candle by x position
+    var bestIdx = -1, bestDist = Infinity;
+    for (var i = 0; i < allCandles.length; i++) {
+        var cx = _toX(allCandles[i].timestamp);
+        if (cx === null) continue;
+        var dist = Math.abs(cx - clickX);
+        if (dist < bestDist) { bestDist = dist; bestIdx = i; }
+    }
+    if (bestIdx < 0 || bestDist > 30) { _hideTooltip(); return; }
+
+    var c = allCandles[bestIdx];
+    _showTooltip(c, clickX, clickY);
+}
+
+function _showTooltip(candle, x, y) {
+    var tt = document.getElementById('candle-tooltip');
+    var d = new Date(candle.timestamp);
+
+    // Format: MM/DD/YY HH:MM (for intraday) or MM/DD/YY (for daily/weekly)
+    var mm = (d.getUTCMonth() + 1); mm = mm < 10 ? '0' + mm : '' + mm;
+    var dd = d.getUTCDate(); dd = dd < 10 ? '0' + dd : '' + dd;
+    var yy = ('' + d.getUTCFullYear()).slice(2);
+    var dateStr = mm + '/' + dd + '/' + yy;
+    if (currentTimeframe === 'hour' || currentTimeframe === '30min') {
+        var hh = d.getUTCHours(); hh = hh < 10 ? '0' + hh : '' + hh;
+        var mn = d.getUTCMinutes(); mn = mn < 10 ? '0' + mn : '' + mn;
+        dateStr += '  ' + hh + ':' + mn;
+    }
+
+    // dxCharts uses hi/lo; fallback to high/low
+    var O = candle.open, H = candle.hi || candle.high, L = candle.lo || candle.low, C = candle.close;
+    var chg = C - O;
+    var chgPct = O > 0 ? ((chg / O) * 100).toFixed(2) : '0.00';
+    var colorClass = chg >= 0 ? 'tt-up' : 'tt-down';
+    var sign = chg >= 0 ? '+' : '';
+
+    var vol = candle.volume || 0;
+    var volStr;
+    if (vol >= 1e6) volStr = (vol / 1e6).toFixed(2) + 'M';
+    else if (vol >= 1e3) volStr = (vol / 1e3).toFixed(1) + 'K';
+    else volStr = '' + vol;
+
+    var dec = C >= 100 ? 2 : (C >= 10 ? 2 : 3);
+
+    tt.innerHTML =
+        '<div class="tt-date">' + dateStr + '</div>' +
+        '<div class="tt-row"><span class="tt-label">O</span><span>' + O.toFixed(dec) + '</span></div>' +
+        '<div class="tt-row"><span class="tt-label">H</span><span>' + H.toFixed(dec) + '</span></div>' +
+        '<div class="tt-row"><span class="tt-label">L</span><span>' + L.toFixed(dec) + '</span></div>' +
+        '<div class="tt-row"><span class="tt-label">C</span><span class="' + colorClass + '">' + C.toFixed(dec) + '</span></div>' +
+        '<div class="tt-row"><span class="tt-label">Chg</span><span class="' + colorClass + '">' + sign + chg.toFixed(dec) + ' (' + sign + chgPct + '%)</span></div>' +
+        '<div class="tt-row"><span class="tt-label">Vol</span><span>' + volStr + '</span></div>';
+
+    // Position tooltip — prefer right of click, flip if near edge
+    var mainArea = document.getElementById('main-chart-area');
+    var maxX = mainArea.clientWidth - 180;
+    var maxY = mainArea.clientHeight - 140;
+    tt.style.left = (x < maxX ? x + 12 : x - 170) + 'px';
+    tt.style.top = (y < maxY ? y + 8 : y - 130) + 'px';
+    tt.style.display = 'block';
+}
+
+function _hideTooltip() {
+    document.getElementById('candle-tooltip').style.display = 'none';
+}
+
+/* ===== Coordinate Helpers (public API with fallbacks) ===== */
+
+function _toY(price) {
+    try { if (chart.data && chart.data.toY) return chart.data.toY(price); } catch(e) {}
+    try { if (chart.chartModel && chart.chartModel.toY) return chart.chartModel.toY(price); } catch(e) {}
+    return null;
+}
+
+function _toX(timestamp) {
+    try { if (chart.data && chart.data.toXFromTimestamp) return chart.data.toXFromTimestamp(timestamp); } catch(e) {}
+    try {
+        if (chart.chartModel && chart.chartModel.candleFromTimestamp) {
+            var c = chart.chartModel.candleFromTimestamp(timestamp);
+            if (c && c.xCenter && chart.chartModel.scale) return c.xCenter(chart.chartModel.scale);
+        }
+    } catch(e) {}
+    try { if (chart.data && chart.data.toXFromCandleIndex) {
+        var idx = _findCandleIdx(timestamp);
+        if (idx >= 0) return chart.data.toXFromCandleIndex(idx);
+    }} catch(e) {}
+    return null;
+}
+
+function _findCandleIdx(timestamp) {
+    for (var i = 0; i < allCandles.length; i++) {
+        if (allCandles[i].timestamp === timestamp) return i;
+    }
+    // Nearest match
+    var best = -1, bestDiff = Infinity;
+    for (var i = 0; i < allCandles.length; i++) {
+        var diff = Math.abs(allCandles[i].timestamp - timestamp);
+        if (diff < bestDiff) { bestDiff = diff; best = i; }
+    }
+    return bestDiff < 86400000 ? best : -1;  // within 1 day
+}
+
+function _getBounds() {
+    try { return chart.bounds.getBounds("PANE_CHART"); } catch(e) {}
+    return null;
+}
+
+/* ===== Overlay Drawing (runs every frame via rAF) ===== */
+
+function _drawAllOverlays() {
+    if (!chart || allCandles.length === 0 || !overlayCtx) return;
+
+    var bounds = _getBounds();
+    if (!bounds || bounds.width <= 0 || bounds.height <= 0) return;
+
+    // Clear entire overlay
+    var dpr = window.devicePixelRatio || 1;
+    overlayCtx.clearRect(0, 0, overlayCanvas.width / dpr, overlayCanvas.height / dpr);
+
+    if (levelsVisible) _drawZones(bounds);
+    if (levelsVisible) _drawLevels(bounds);
+    if (masVisible) _drawMAs(bounds);
+    _drawOverlayIndicators(bounds);
+    if (markersVisible) _drawMarkers(bounds);
+    _drawScorecard(bounds);
+    _drawXAxisLabels(bounds);
+    _drawAllSubPanels(bounds);
+    // Check if user scrolled near the left edge → lazy-load more history
+    _checkFetchMore();
+    // Show loading indicator when fetching more history
+    if (fetchingMore) _drawLoadingIndicator(bounds);
+}
+
+/* ----- Loading Indicator ----- */
+
+function _drawLoadingIndicator(bounds) {
+    var ctx = overlayCtx;
+    ctx.save();
+    var text = 'Loading history\u2026';
+    ctx.font = 'bold 13px Consolas, monospace';
+    var tw = ctx.measureText(text).width;
+    var x = bounds.x + 20;
+    var y = bounds.y + bounds.height / 2;
+    ctx.fillStyle = 'rgba(26, 26, 46, 0.9)';
+    ctx.fillRect(x - 8, y - 14, tw + 16, 22);
+    ctx.strokeStyle = '#7070ff';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(x - 8, y - 14, tw + 16, 22);
+    ctx.fillStyle = '#d1d4dc';
+    ctx.textAlign = 'left';
+    ctx.fillText(text, x, y);
+    ctx.restore();
+}
+
+/* ----- Custom X-Axis Labels ----- */
+
+function _drawXAxisLabels(bounds) {
+    var ctx = overlayCtx;
+    if (allCandles.length < 2) return;
+
+    // Determine visible range by checking which candles map into bounds
+    var visibleCandles = [];
+    for (var i = 0; i < allCandles.length; i++) {
+        var x = _toX(allCandles[i].timestamp);
+        if (x !== null && x >= bounds.x && x <= bounds.x + bounds.width) {
+            visibleCandles.push({ idx: i, x: x, ts: allCandles[i].timestamp });
+        }
+    }
+    if (visibleCandles.length === 0) return;
+
+    // Decide label density: aim for ~8-12 labels across the width
+    var targetLabels = Math.max(4, Math.min(12, Math.floor(bounds.width / 90)));
+    var step = Math.max(1, Math.floor(visibleCandles.length / targetLabels));
+
+    var yPos = bounds.y + bounds.height - 4;
+    ctx.save();
+    ctx.font = '10px Consolas, monospace';
+    ctx.fillStyle = '#868993';
+    ctx.textAlign = 'center';
+
+    var lastLabelX = -100;
+    var prevLabelTs = null;
+    for (var j = 0; j < visibleCandles.length; j += step) {
+        var vc = visibleCandles[j];
+        if (vc.x - lastLabelX < 55) continue;  // prevent overlap
+
+        var label = _formatDateShort(vc.ts, prevLabelTs);
+
+        // Bold year/month boundary labels
+        var isBoundary = false;
+        if (prevLabelTs && (currentTimeframe === 'day' || currentTimeframe === 'week')) {
+            var cd = new Date(vc.ts); var pd = new Date(prevLabelTs);
+            if (pd.getUTCFullYear() !== cd.getUTCFullYear() || pd.getUTCMonth() !== cd.getUTCMonth()) {
+                isBoundary = true;
+            }
+        }
+        if (isBoundary) {
+            ctx.fillStyle = '#b0b4c0';
+            ctx.font = 'bold 10px Consolas, monospace';
+        } else {
+            ctx.fillStyle = '#868993';
+            ctx.font = '10px Consolas, monospace';
+        }
+        ctx.fillText(label, vc.x, yPos);
+        prevLabelTs = vc.ts;
+        lastLabelX = vc.x;
+    }
+
+    ctx.restore();
+}
+
+/* ----- Levels ----- */
+
+function addLevelLine(id, price, label, color, lineStyle) {
+    levelLines[id] = { price: price, label: label, color: color, lineStyle: lineStyle || 'solid' };
+}
+
+function _drawLevels(bounds) {
+    var ctx = overlayCtx;
+    var keys = Object.keys(levelLines);
+
+    // Edge-label stacking for off-screen levels
+    var topOffset = 0;
+    var botOffset = 0;
+    var edgeH = 16;
+
+    // Get visible price range from candles for above/below determination
+    var visRange = _getVisibleRange();
+    var visMidPrice = null;
+    if (visRange) {
+        var hiP = -Infinity, loP = Infinity;
+        for (var j = visRange.first; j <= visRange.last; j++) {
+            var c = allCandles[j];
+            if ((c.hi || c.high) > hiP) hiP = c.hi || c.high;
+            if ((c.lo || c.low) < loP) loP = c.lo || c.low;
+        }
+        visMidPrice = (hiP + loP) / 2;
+    }
+
+    for (var i = 0; i < keys.length; i++) {
+        var line = levelLines[keys[i]];
+        var y = _toY(line.price);
+        var inBounds = (y !== null && y >= bounds.y && y <= bounds.y + bounds.height);
+
+        if (inBounds) {
+            // ---- In-range: draw full horizontal line + label ----
+            ctx.save();
+            ctx.strokeStyle = line.color;
+            ctx.lineWidth = 1;
+            if (line.lineStyle === 'dashed') ctx.setLineDash([6, 4]);
+            else if (line.lineStyle === 'dotted') ctx.setLineDash([2, 3]);
+            else ctx.setLineDash([]);
+
+            ctx.beginPath();
+            ctx.moveTo(bounds.x, y);
+            ctx.lineTo(bounds.x + bounds.width, y);
+            ctx.stroke();
+
+            // Label on right side
+            var text = line.label + ' $' + line.price.toFixed(2);
+            ctx.font = '11px Consolas, monospace';
+            var tw = ctx.measureText(text).width;
+            var lx = bounds.x + bounds.width - tw - 12;
+            var ly = y - 6;
+            ctx.fillStyle = 'rgba(26, 26, 46, 0.85)';
+            ctx.fillRect(lx - 4, ly - 10, tw + 8, 14);
+            ctx.fillStyle = line.color;
+            ctx.textAlign = 'left';
+            ctx.fillText(text, lx, ly);
+            ctx.restore();
+        } else {
+            // ---- Off-screen: draw compact edge label ----
+            var isAbove = false;
+            if (y !== null) {
+                isAbove = (y < bounds.y);
+            } else if (visMidPrice !== null) {
+                isAbove = (line.price > visMidPrice);
+            }
+
+            var arrow = isAbove ? '\u25B2 ' : '\u25BC ';
+            var eText = arrow + line.label + ' $' + line.price.toFixed(2);
+            ctx.save();
+            ctx.font = '10px Consolas, monospace';
+            var eTw = ctx.measureText(eText).width;
+            var eLx = bounds.x + bounds.width - eTw - 12;
+            var eLy;
+            if (isAbove) {
+                eLy = bounds.y + 12 + topOffset;
+                topOffset += edgeH;
+            } else {
+                eLy = bounds.y + bounds.height - 8 - botOffset;
+                botOffset += edgeH;
+            }
+            ctx.fillStyle = 'rgba(26, 26, 46, 0.85)';
+            ctx.fillRect(eLx - 4, eLy - 10, eTw + 8, 14);
+            ctx.fillStyle = line.color;
+            ctx.globalAlpha = 0.7;
+            ctx.textAlign = 'left';
+            ctx.fillText(eText, eLx, eLy);
+            ctx.restore();
+        }
+    }
+}
+
+/* ----- Price Zones ----- */
+
+function addZone(id, priceTop, priceBottom, label, color) {
+    priceZones[id] = { top: priceTop, bottom: priceBottom, label: label, color: color };
+}
+
+function _drawZones(bounds) {
+    var ctx = overlayCtx;
+    var keys = Object.keys(priceZones);
+    for (var i = 0; i < keys.length; i++) {
+        var zone = priceZones[keys[i]];
+        var yTop = _toY(zone.top);
+        var yBot = _toY(zone.bottom);
+        if (yTop === null || yBot === null) continue;
+        // Clamp to chart bounds
+        yTop = Math.max(yTop, bounds.y);
+        yBot = Math.min(yBot, bounds.y + bounds.height);
+        if (yTop >= yBot) continue;
+
+        ctx.save();
+        ctx.fillStyle = zone.color;
+        ctx.fillRect(bounds.x, yTop, bounds.width, yBot - yTop);
+
+        // Label centered in zone
+        var text = zone.label;
+        ctx.font = '10px Consolas, monospace';
+        var tw = ctx.measureText(text).width;
+        var cx = bounds.x + bounds.width - tw - 12;
+        var cy = yTop + (yBot - yTop) / 2 + 3;
+        ctx.fillStyle = 'rgba(26, 26, 46, 0.7)';
+        ctx.fillRect(cx - 4, cy - 10, tw + 8, 14);
+        ctx.fillStyle = '#4a90d9';
+        ctx.textAlign = 'left';
+        ctx.fillText(text, cx, cy);
+        ctx.restore();
+    }
+}
+
+/* ----- Moving Averages ----- */
+
+function addMALine(id, pointsJson, color, width, label) {
+    try {
+        maLines[id] = { points: JSON.parse(pointsJson), color: color, width: width || 1.5, label: label || id };
+    } catch (e) {
+        console.error('Failed to parse MA points:', e);
+    }
+}
+
+function _drawMAs(bounds) {
+    var ctx = overlayCtx;
+    var ids = Object.keys(maLines);
+    for (var m = 0; m < ids.length; m++) {
+        var ma = maLines[ids[m]];
+        if (!ma.points || ma.points.length < 2) continue;
+
+        ctx.save();
+        ctx.strokeStyle = ma.color;
+        ctx.lineWidth = ma.width;
+        ctx.setLineDash([]);
+
+        // Clip to chart pane
+        ctx.beginPath();
+        ctx.rect(bounds.x, bounds.y, bounds.width, bounds.height);
+        ctx.clip();
+
+        ctx.beginPath();
+        var started = false;
+        for (var i = 0; i < ma.points.length; i++) {
+            var pt = ma.points[i];
+            var x = _toX(pt.timestamp);
+            var y = _toY(pt.value);
+            if (x === null || y === null) continue;
+            if (x < bounds.x || x > bounds.x + bounds.width) {
+                started = false;
+                continue;
+            }
+            if (!started) { ctx.moveTo(x, y); started = true; }
+            else ctx.lineTo(x, y);
+        }
+        ctx.stroke();
+        ctx.restore();
+    }
+}
+
+/* ----- Trade Markers ----- */
+
+function addTradeMarker(timestamp, shares, side) {
+    tradeMarkers.push({ timestamp: timestamp, shares: shares, side: side });
+}
+
+function _drawMarkers(bounds) {
+    if (tradeMarkers.length === 0) return;
+    var ctx = overlayCtx;
+
+    // Build timestamp -> candle lookup
+    var candleMap = {};
+    for (var c = 0; c < allCandles.length; c++) {
+        candleMap[allCandles[c].timestamp] = allCandles[c];
+    }
+
+    for (var i = 0; i < tradeMarkers.length; i++) {
+        var m = tradeMarkers[i];
+        var candle = candleMap[m.timestamp];
+        if (!candle) continue;
+
+        var x = _toX(m.timestamp);
+        if (x === null || x < bounds.x || x > bounds.x + bounds.width) continue;
+
+        var isBuy = (m.side === 'buy');
+        var color = isBuy ? '#26a69a' : '#ef5350';
+
+        // Position diamond below low (buy) or above high (sell)
+        var anchorY = isBuy ? _toY(candle.lo) : _toY(candle.hi);
+        if (anchorY === null) continue;
+        var offset = 10;
+        var markerY = isBuy ? anchorY + offset : anchorY - offset;
+
+        // Draw diamond
+        var sz = 5;
+        ctx.save();
+        ctx.fillStyle = color;
+        ctx.beginPath();
+        ctx.moveTo(x, markerY - sz);
+        ctx.lineTo(x + sz, markerY);
+        ctx.lineTo(x, markerY + sz);
+        ctx.lineTo(x - sz, markerY);
+        ctx.closePath();
+        ctx.fill();
+
+        // Share count label
+        var label = String(m.shares);
+        ctx.font = '10px Consolas, monospace';
+        var tw = ctx.measureText(label).width;
+        var labelY = isBuy ? markerY + sz + 13 : markerY - sz - 4;
+        ctx.fillStyle = 'rgba(26, 26, 46, 0.85)';
+        ctx.fillRect(x - tw / 2 - 3, labelY - 10, tw + 6, 13);
+        ctx.fillStyle = color;
+        ctx.textAlign = 'center';
+        ctx.fillText(label, x, labelY);
+        ctx.restore();
+    }
+}
+
+/* ----- Scorecard ----- */
+
+function setScorecard(jsonStr) {
+    try {
+        scorecardData = JSON.parse(jsonStr);
+    } catch(e) {
+        console.error('Failed to parse scorecard JSON:', e);
+    }
+}
+
+function _gradeColor(grade) {
+    if (!grade) return '#888';
+    if (grade === 'A+' || grade === 'A') return '#28A745';
+    if (grade === 'B+' || grade === 'B') return '#20C997';
+    if (grade === 'C+' || grade === 'C') return '#FFC107';
+    if (grade === 'D') return '#FD7E14';
+    return '#DC3545';
+}
+
+function _pointsColor(pts) {
+    if (pts > 0) return '#26a69a';
+    if (pts < 0) return '#ef5350';
+    return '#888';
+}
+
+function _drawScorecard(bounds) {
+    if (!scorecardData || !scorecardVisible) return;
+    var ctx = overlayCtx;
+    var d = scorecardData;
+
+    // Card dimensions
+    var cardW = 220;
+    var lineH = 16;
+    var pad = 10;
+    var lines = [];
+
+    // Build scorecard lines: [text, color, rightText, rightColor]
+    // Header: symbol + company name
+    var compName = d.company_name || '';
+    if (compName.length > 18) compName = compName.substring(0, 17) + '.';
+    lines.push([d.symbol || '', '#d1d4dc', compName, '#888']);
+
+    // Industry / Sector
+    if (d.industry || d.sector) {
+        var indStr = d.industry || '';
+        if (indStr.length > 28) indStr = indStr.substring(0, 27) + '.';
+        lines.push([indStr, '#6a9fd8', '', '']);
+        if (d.sector) {
+            lines.push([d.sector, '#888', '', '']);
+        }
+    }
+
+    // State + price
+    var priceStr = d.current_price ? '$' + d.current_price.toFixed(2) : '';
+    lines.push([d.state_label || '', '#d1d4dc', priceStr, '#d1d4dc']);
+
+    // P&L line: percentage + dollar
+    var pnlPctStr = d.pnl_pct !== null && d.pnl_pct !== undefined
+        ? (d.pnl_pct >= 0 ? '+' : '') + d.pnl_pct.toFixed(1) + '%' : '--';
+    var pnlDolStr = '';
+    if (d.pnl_dollar !== null && d.pnl_dollar !== undefined) {
+        var sign = d.pnl_dollar >= 0 ? '+' : '';
+        pnlDolStr = sign + '$' + Math.abs(d.pnl_dollar).toLocaleString(undefined, {minimumFractionDigits: 0, maximumFractionDigits: 0});
+    }
+    var pnlColor = d.pnl_pct > 0 ? '#26a69a' : d.pnl_pct < 0 ? '#ef5350' : '#888';
+    lines.push(['P&L:', '#888', pnlPctStr + (pnlDolStr ? '  ' + pnlDolStr : ''), pnlColor]);
+
+    // Hold + A/D
+    var holdStr = d.hold_days !== null && d.hold_days !== undefined
+        ? 'Hold: ' + d.hold_days + 'd' : '';
+    var adStr = d.ad_rating ? 'A/D:' + d.ad_rating : '';
+    if (holdStr || adStr) {
+        lines.push([holdStr, '#888', adStr, _adColor(d.ad_rating)]);
+    }
+
+    // Pyramid status
+    var py1 = d.e2_shares && d.e2_shares > 0 ? 'PY1=DONE' : 'PY1=--';
+    var py2 = d.e3_shares && d.e3_shares > 0 ? 'PY2=DONE' : 'PY2=--';
+    lines.push(['Pyr:', '#888', py1 + ' ' + py2, '#d1d4dc']);
+
+    // Separator - Health
+    lines.push(['--- HEALTH ---', '#555', '', '']);
+
+    // Health
+    var healthStr = d.health_rating || '--';
+    var healthColor = _healthColor(healthStr);
+    lines.push([healthStr, healthColor, '', '']);
+
+    // Stop
+    if (d.stop_price && d.stop_price > 0) {
+        var stopPct = d.hard_stop_pct ? ' (' + d.hard_stop_pct.toFixed(0) + '%)' : '';
+        lines.push(['Stop:', '#888', '$' + d.stop_price.toFixed(2) + stopPct, '#ef5350']);
+    }
+
+    // TP1
+    if (d.tp1_target && d.tp1_target > 0) {
+        var tp1Str = '$' + d.tp1_target.toFixed(2) + ' (' + (d.tp1_pct || 20).toFixed(0) + '%)';
+        lines.push(['TP1:', '#888', tp1Str, '#28A745']);
+    }
+
+    // TP2
+    if (d.tp2_target && d.tp2_target > 0) {
+        var tp2Str = '$' + d.tp2_target.toFixed(2) + ' (' + (d.tp2_pct || 30).toFixed(0) + '%)';
+        lines.push(['TP2:', '#888', tp2Str, '#28A745']);
+    }
+
+    // Score breakdown section
+    var sb = d.score_breakdown;
+    if (sb) {
+        // Score header with grade
+        var scoreHdr = 'SCORE: ' + (sb.grade || '?') + ' (' + (sb.score || 0) + ')';
+        lines.push(['--- ' + scoreHdr + ' ---', _gradeColor(sb.grade), '', '']);
+
+        // Static components
+        if (sb.components) {
+            for (var ci = 0; ci < sb.components.length; ci++) {
+                var c = sb.components[ci];
+                var ptsStr = (c.points >= 0 ? '+' : '') + c.points;
+                lines.push([c.reason || c.name, '#aaa', ptsStr, _pointsColor(c.points)]);
+            }
+        }
+
+        // Dynamic components
+        if (sb.dynamic_components && sb.dynamic_components.length > 0) {
+            lines.push(['--- DYNAMIC (' + sb.dynamic_score + ') ---', '#555', '', '']);
+            for (var di = 0; di < sb.dynamic_components.length; di++) {
+                var dc = sb.dynamic_components[di];
+                var dPtsStr = (dc.points >= 0 ? '+' : '') + dc.points;
+                lines.push([dc.reason || dc.name, '#aaa', dPtsStr, _pointsColor(dc.points)]);
+            }
+        }
+    }
+
+    // Market regime section (mirrors Discord morning analysis)
+    var rg = d.regime;
+    if (rg && rg.regime) {
+        var rgColor = rg.regime === 'BULLISH' ? '#26a69a'
+                    : rg.regime === 'BEARISH' ? '#ef5350' : '#FFC107';
+
+        // Regime header
+        lines.push(['--- MARKET (' + (rg.date || '') + ') ---', '#555', '', '']);
+        lines.push([rg.regime, rgColor, rg.score !== null ? '(' + rg.score + ')' : '', '#888']);
+
+        // IBD status + exposure
+        if (rg.ibd_status) {
+            var ibdShort = {'CONFIRMED_UPTREND':'Uptrend','UPTREND_UNDER_PRESSURE':'Pressure',
+                            'RALLY_ATTEMPT':'Rally','CORRECTION':'Correction'}[rg.ibd_status] || rg.ibd_status;
+            var ibdColor = rg.ibd_status === 'CONFIRMED_UPTREND' ? '#26a69a'
+                         : rg.ibd_status === 'CORRECTION' ? '#ef5350'
+                         : rg.ibd_status === 'UPTREND_UNDER_PRESSURE' ? '#FD7E14' : '#FFC107';
+            var expStr = (rg.exposure_min != null && rg.exposure_max != null)
+                       ? rg.exposure_min + '-' + rg.exposure_max + '%' : '';
+            lines.push(['IBD:' + ibdShort, ibdColor, expStr, '#888']);
+        }
+
+        // D-day counts with deltas
+        var spyDelta = rg.spy_delta != null ? (rg.spy_delta >= 0 ? '+' : '') + rg.spy_delta : '';
+        var qqqDelta = rg.qqq_delta != null ? (rg.qqq_delta >= 0 ? '+' : '') + rg.qqq_delta : '';
+        lines.push(['SPY:' + (rg.spy_d || 0) + 'D(' + spyDelta + ')', '#d1d4dc',
+                     'QQQ:' + (rg.qqq_d || 0) + 'D(' + qqqDelta + ')', '#d1d4dc']);
+        lines.push(['Trend:', '#888', rg.trend || '--', _trendColor(rg.trend)]);
+
+        // Phase
+        if (rg.phase) {
+            var phShort = {'CONFIRMED_UPTREND':'Uptrend','UPTREND_UNDER_PRESSURE':'Pressure',
+                           'RALLY_ATTEMPT':'Rally Attempt','CORRECTION':'Correction'}[rg.phase] || rg.phase;
+            var phColor = rg.phase === 'CONFIRMED_UPTREND' ? '#26a69a'
+                        : rg.phase === 'CORRECTION' ? '#ef5350'
+                        : rg.phase === 'UPTREND_UNDER_PRESSURE' ? '#FD7E14' : '#FFC107';
+            var phRight = '';
+            if (rg.has_ftd && rg.days_since_ftd != null) {
+                phRight = 'FTD ' + rg.days_since_ftd + 'd ago';
+            } else if (rg.rally_day && rg.rally_day > 0) {
+                phRight = 'Rally Day ' + rg.rally_day;
+            }
+            lines.push([phShort, phColor, phRight, '#888']);
+        }
+
+        // Overnight futures
+        if (rg.es_pct != null || rg.nq_pct != null || rg.ym_pct != null) {
+            var _fPct = function(v) {
+                if (v == null) return '--';
+                return (v >= 0 ? '+' : '') + v.toFixed(2) + '%';
+            };
+            var _fCol = function(v) {
+                if (v == null) return '#888';
+                return v > 0 ? '#26a69a' : v < 0 ? '#ef5350' : '#888';
+            };
+            lines.push(['ES:' + _fPct(rg.es_pct), _fCol(rg.es_pct),
+                         'NQ:' + _fPct(rg.nq_pct), _fCol(rg.nq_pct)]);
+            lines.push(['YM:' + _fPct(rg.ym_pct), _fCol(rg.ym_pct), '', '']);
+        }
+
+        // Entry risk
+        if (rg.entry_risk) {
+            var riskColor = rg.entry_risk === 'LOW' ? '#26a69a'
+                          : rg.entry_risk === 'MODERATE' ? '#FFC107'
+                          : rg.entry_risk === 'ELEVATED' ? '#FD7E14' : '#ef5350';
+            var riskScoreStr = rg.risk_score != null
+                ? '(' + (rg.risk_score >= 0 ? '+' : '') + rg.risk_score + ')' : '';
+            lines.push(['Risk:' + rg.entry_risk, riskColor, riskScoreStr, '#888']);
+        }
+
+        // Sentiment
+        if (rg.fg_score != null || rg.vix != null) {
+            var fgStr = rg.fg_score != null
+                ? 'F&G:' + Math.round(rg.fg_score) : '';
+            var fgColor = rg.fg_score != null
+                ? (rg.fg_score >= 60 ? '#26a69a' : rg.fg_score <= 40 ? '#ef5350' : '#FFC107') : '#888';
+            var vixStr = rg.vix != null ? 'VIX:' + rg.vix : '';
+            var vixColor = rg.vix != null
+                ? (rg.vix <= 15 ? '#26a69a' : rg.vix >= 25 ? '#ef5350' : '#FFC107') : '#888';
+            lines.push([fgStr, fgColor, vixStr, vixColor]);
+        }
+    }
+
+    // Calculate card height
+    var cardH = pad * 2 + lines.length * lineH + 4;
+
+    // Position: upper left of chart pane
+    var x0 = bounds.x + 16;
+    var y0 = bounds.y + 40;
+
+    // Background
+    ctx.save();
+    ctx.fillStyle = 'rgba(16, 16, 32, 0.88)';
+    ctx.strokeStyle = 'rgba(100, 100, 160, 0.4)';
+    ctx.lineWidth = 1;
+    _roundRect(ctx, x0, y0, cardW, cardH, 6);
+    ctx.fill();
+    ctx.stroke();
+
+    // Draw lines
+    ctx.font = '11px Consolas, monospace';
+    var yLine = y0 + pad + 12;
+
+    for (var i = 0; i < lines.length; i++) {
+        var left = lines[i][0];
+        var lColor = lines[i][1];
+        var right = lines[i][2];
+        var rColor = lines[i][3];
+
+        // Check for separator line
+        if (left.indexOf('---') === 0) {
+            ctx.fillStyle = lColor || '#555';
+            ctx.textAlign = 'center';
+            ctx.fillText(left, x0 + cardW / 2, yLine);
+            yLine += lineH;
+            continue;
+        }
+
+        if (left) {
+            ctx.fillStyle = lColor;
+            ctx.textAlign = 'left';
+            ctx.fillText(left, x0 + pad, yLine);
+        }
+        if (right) {
+            ctx.fillStyle = rColor;
+            ctx.textAlign = 'right';
+            ctx.fillText(right, x0 + cardW - pad, yLine);
+        }
+        yLine += lineH;
+    }
+
+    ctx.restore();
+
+    // Draw MA legend below scorecard
+    if (masVisible) _drawMALegend(bounds, x0, y0 + cardH + 6, cardW);
+}
+
+function _drawMALegend(bounds, x0, y0, cardW) {
+    var ids = Object.keys(maLines);
+    if (ids.length === 0) return;
+    var ctx = overlayCtx;
+    var pad = 8;
+    var lineH = 16;
+    var legendH = pad * 2 + ids.length * lineH;
+
+    ctx.save();
+    ctx.fillStyle = 'rgba(16, 16, 32, 0.88)';
+    ctx.strokeStyle = 'rgba(100, 100, 160, 0.4)';
+    ctx.lineWidth = 1;
+    _roundRect(ctx, x0, y0, cardW, legendH, 6);
+    ctx.fill();
+    ctx.stroke();
+
+    ctx.font = '11px Consolas, monospace';
+    var yLine = y0 + pad + 11;
+    for (var i = 0; i < ids.length; i++) {
+        var ma = maLines[ids[i]];
+        // Color swatch line
+        ctx.strokeStyle = ma.color;
+        ctx.lineWidth = 2;
+        ctx.setLineDash([]);
+        ctx.beginPath();
+        ctx.moveTo(x0 + pad, yLine - 4);
+        ctx.lineTo(x0 + pad + 20, yLine - 4);
+        ctx.stroke();
+        // Label in matching color
+        ctx.fillStyle = ma.color;
+        ctx.textAlign = 'left';
+        ctx.fillText(ma.label, x0 + pad + 26, yLine);
+        yLine += lineH;
+    }
+    ctx.restore();
+}
+
+function _roundRect(ctx, x, y, w, h, r) {
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.lineTo(x + w - r, y);
+    ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+    ctx.lineTo(x + w, y + h - r);
+    ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+    ctx.lineTo(x + r, y + h);
+    ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+    ctx.lineTo(x, y + r);
+    ctx.quadraticCurveTo(x, y, x + r, y);
+    ctx.closePath();
+}
+
+function _rsColor(rs) {
+    if (!rs) return '#888';
+    if (rs >= 90) return '#26a69a';
+    if (rs >= 80) return '#8bc34a';
+    if (rs >= 70) return '#d1d4dc';
+    return '#ef5350';
+}
+
+function _adColor(ad) {
+    if (!ad) return '#888';
+    var c = ad.charAt(0);
+    if (c === 'A') return '#26a69a';
+    if (c === 'B') return '#8bc34a';
+    if (c === 'C') return '#d1d4dc';
+    return '#ef5350';
+}
+
+function _healthColor(rating) {
+    if (!rating) return '#888';
+    var r = rating.toUpperCase();
+    if (r.indexOf('HEALTHY') >= 0 || r.indexOf('STRONG') >= 0) return '#26a69a';
+    if (r.indexOf('CAUTION') >= 0 || r.indexOf('WATCH') >= 0) return '#FFC107';
+    if (r.indexOf('DANGER') >= 0 || r.indexOf('WEAK') >= 0) return '#ef5350';
+    return '#d1d4dc';
+}
+
+function _trendColor(trend) {
+    if (!trend) return '#888';
+    if (trend === 'IMPROVING' || trend === 'HEALTHY') return '#26a69a';
+    if (trend === 'WORSENING') return '#ef5350';
+    if (trend === 'ELEVATED_STABLE') return '#FD7E14';
+    return '#d1d4dc';
+}
+
+/* ===== Toggle Controls ===== */
+
+function toggleLevels() {
+    levelsVisible = !levelsVisible;
+    document.getElementById('btn-levels').classList.toggle('active', levelsVisible);
+}
+
+function toggleMAs() {
+    masVisible = !masVisible;
+    document.getElementById('btn-mas').classList.toggle('active', masVisible);
+}
+
+function toggleMarkers() {
+    markersVisible = !markersVisible;
+    document.getElementById('btn-markers').classList.toggle('active', markersVisible);
+}
+
+function toggleScorecard() {
+    scorecardVisible = !scorecardVisible;
+    document.getElementById('btn-scorecard').classList.toggle('active', scorecardVisible);
+}
+
+function toggleRTH() {
+    rthOnly = !rthOnly;
+    var btn = document.getElementById('btn-rth');
+    btn.textContent = rthOnly ? 'RTH' : 'ETH';
+    btn.classList.toggle('active', rthOnly);
+    // Re-filter and re-draw
+    allCandles = _applySessionFilter(allCandlesRaw);
+    if (chart && allCandles.length > 0) {
+        var symbol = document.getElementById('symbol-label').textContent;
+        chart.setData({
+            candles: allCandles,
+            instrument: { symbol: symbol, priceIncrements: [0.01] },
+        });
+    }
+    // Signal Python to recalculate MAs and overlays for the filtered data
+    document.title = 'SESSION:' + (rthOnly ? 'rth' : 'eth');
+}
+
+function showOverlaySection() {
+    document.getElementById('overlay-section').style.display = 'flex';
+}
+
+/* ===== Indicator System ===== */
+
+function setIndicatorCatalog(jsonStr, available) {
+    try { indicatorCatalog = JSON.parse(jsonStr); } catch(e) {}
+    pandas_ta_available = available;
+}
+
+function toggleIndicatorPicker() {
+    var picker = document.getElementById('indicator-picker');
+    if (!picker) picker = _createIndicatorPicker();
+    indicatorPickerOpen = !indicatorPickerOpen;
+    picker.style.display = indicatorPickerOpen ? 'block' : 'none';
+    document.getElementById('btn-indicators').classList.toggle('active', indicatorPickerOpen);
+}
+
+function _createIndicatorPicker() {
+    var picker = document.createElement('div');
+    picker.id = 'indicator-picker';
+    picker.className = 'indicator-picker';
+
+    // Group by category
+    var cats = {};
+    var ids = Object.keys(indicatorCatalog);
+    for (var i = 0; i < ids.length; i++) {
+        var id = ids[i];
+        var ind = indicatorCatalog[id];
+        var cat = ind.category || 'Other';
+        // Show Performance indicators even without pandas-ta
+        if (!pandas_ta_available && cat !== 'Performance') continue;
+        if (!cats[cat]) cats[cat] = [];
+        cats[cat].push({ id: id, name: ind.name, panel: ind.panel });
+    }
+
+    if (Object.keys(cats).length === 0) {
+        picker.innerHTML = '<div style="color:#ef5350;font-size:11px;">pandas-ta not installed.<br>Run: pip install pandas-ta-classic</div>';
+        document.getElementById('main-chart-area').appendChild(picker);
+        return picker;
+    }
+
+    var catOrder = ['Momentum', 'Trend', 'Volatility', 'Volume', 'Performance'];
+    for (var ci = 0; ci < catOrder.length; ci++) {
+        var catName = catOrder[ci];
+        if (!cats[catName]) continue;
+        var hdr = document.createElement('div');
+        hdr.className = 'cat-header';
+        hdr.textContent = catName;
+        picker.appendChild(hdr);
+
+        for (var j = 0; j < cats[catName].length; j++) {
+            var item = cats[catName][j];
+            var row = document.createElement('label');
+            var cb = document.createElement('input');
+            cb.type = 'checkbox';
+            cb.dataset.indicatorId = item.id;
+            cb.onchange = (function(iid) {
+                return function() {
+                    if (this.checked) {
+                        document.title = 'IND_ADD:' + iid;
+                    } else {
+                        _removeIndicator(iid);
+                        document.title = 'IND_REM:' + iid;
+                    }
+                };
+            })(item.id);
+            row.appendChild(cb);
+            row.appendChild(document.createTextNode(' ' + item.name));
+            var badge = document.createElement('span');
+            badge.className = 'badge';
+            badge.textContent = item.panel === 'overlay' ? 'OVR' : 'SUB';
+            row.appendChild(badge);
+            picker.appendChild(row);
+        }
+    }
+
+    document.getElementById('main-chart-area').appendChild(picker);
+    return picker;
+}
+
+function addIndicator(jsonStr) {
+    var data = JSON.parse(jsonStr);
+    if (data.panel_type === 'overlay') {
+        overlayIndicators[data.indicator_id] = {
+            display_name: data.display_name,
+            series: data.series,
+            visible: true,
+        };
+    } else {
+        // Sub-chart
+        if (!subPanels[data.indicator_id]) {
+            _createSubPanel(data.indicator_id, {
+                displayName: data.display_name,
+                yRange: data.y_range ? { min: data.y_range[0], max: data.y_range[1] } : null,
+                refLines: data.ref_lines || [],
+            });
+        }
+        subPanels[data.indicator_id].series = {};
+        for (var i = 0; i < data.series.length; i++) {
+            var s = data.series[i];
+            subPanels[data.indicator_id].series[s.name] = s;
+        }
+    }
+}
+
+function _removeIndicator(indicatorId) {
+    if (overlayIndicators[indicatorId]) {
+        delete overlayIndicators[indicatorId];
+    }
+    if (subPanels[indicatorId]) {
+        var el = document.getElementById('subpanel-' + indicatorId);
+        if (el) el.parentNode.removeChild(el);
+        delete subPanels[indicatorId];
+        _resizeMainChart();
+    }
+}
+
+/* ----- Overlay Indicator Drawing ----- */
+
+function _drawOverlayIndicators(bounds) {
+    var ctx = overlayCtx;
+    var ids = Object.keys(overlayIndicators);
+    for (var i = 0; i < ids.length; i++) {
+        var ind = overlayIndicators[ids[i]];
+        if (!ind.visible) continue;
+        for (var s = 0; s < ind.series.length; s++) {
+            var series = ind.series[s];
+            ctx.save();
+            ctx.beginPath();
+            ctx.rect(bounds.x, bounds.y, bounds.width, bounds.height);
+            ctx.clip();
+
+            if (series.series_type === 'line') {
+                _drawIndLine(ctx, series, bounds, false);
+            } else if (series.series_type === 'dots') {
+                _drawIndDots(ctx, series, bounds);
+            } else if (series.series_type === 'band_fill') {
+                _drawIndBandFill(ctx, series, bounds);
+            }
+            ctx.restore();
+        }
+    }
+}
+
+function _drawIndLine(ctx, series, bounds, isSubPanel) {
+    ctx.strokeStyle = series.color;
+    ctx.lineWidth = series.width || 1.5;
+    if (series.dash_style === 'dashed') ctx.setLineDash([6, 4]);
+    else if (series.dash_style === 'dotted') ctx.setLineDash([2, 3]);
+    else ctx.setLineDash([]);
+    ctx.beginPath();
+    var started = false;
+    var toYfn = isSubPanel ? null : _toY;  // sub-panels pass pre-computed Y
+    for (var i = 0; i < series.data.length; i++) {
+        var pt = series.data[i];
+        var x = _toX(pt.timestamp);
+        var y = isSubPanel ? pt._py : _toY(pt.value);
+        if (x === null || y === null) continue;
+        if (x < bounds.x || x > bounds.x + bounds.width) { started = false; continue; }
+        if (!started) { ctx.moveTo(x, y); started = true; }
+        else ctx.lineTo(x, y);
+    }
+    ctx.stroke();
+}
+
+function _drawIndDots(ctx, series, bounds) {
+    ctx.fillStyle = series.color;
+    for (var i = 0; i < series.data.length; i++) {
+        var pt = series.data[i];
+        var x = _toX(pt.timestamp);
+        var y = _toY(pt.value);
+        if (x === null || y === null) continue;
+        if (x < bounds.x || x > bounds.x + bounds.width) continue;
+        ctx.beginPath();
+        ctx.arc(x, y, 2.5, 0, Math.PI * 2);
+        ctx.fill();
+    }
+}
+
+function _drawIndBandFill(ctx, series, bounds) {
+    if (!series.data || !series.data2 || series.data.length < 2) return;
+    ctx.fillStyle = series.color;
+    ctx.beginPath();
+    // Forward pass: upper line
+    var started = false;
+    for (var i = 0; i < series.data.length; i++) {
+        var pt = series.data[i];
+        var x = _toX(pt.timestamp);
+        var y = _toY(pt.value);
+        if (x === null || y === null) continue;
+        if (x < bounds.x || x > bounds.x + bounds.width) continue;
+        if (!started) { ctx.moveTo(x, y); started = true; }
+        else ctx.lineTo(x, y);
+    }
+    // Reverse pass: lower line
+    for (var j = series.data2.length - 1; j >= 0; j--) {
+        var pt2 = series.data2[j];
+        var x2 = _toX(pt2.timestamp);
+        var y2 = _toY(pt2.value);
+        if (x2 === null || y2 === null) continue;
+        if (x2 < bounds.x || x2 > bounds.x + bounds.width) continue;
+        ctx.lineTo(x2, y2);
+    }
+    ctx.closePath();
+    ctx.fill();
+}
+
+/* ----- Sub-Panel Infrastructure ----- */
+
+function _createSubPanel(panelId, config) {
+    var container = document.getElementById('sub-panels-container');
+    var panel = document.createElement('div');
+    panel.id = 'subpanel-' + panelId;
+    panel.className = 'sub-panel';
+
+    var label = document.createElement('span');
+    label.className = 'panel-label';
+    label.textContent = config.displayName;
+    panel.appendChild(label);
+
+    var closeBtn = document.createElement('button');
+    closeBtn.className = 'panel-close-btn';
+    closeBtn.textContent = '\u00d7';
+    closeBtn.onclick = function() {
+        _removeIndicator(panelId);
+        // Uncheck in picker
+        var cb = document.querySelector('[data-indicator-id="' + panelId + '"]');
+        if (cb) cb.checked = false;
+        document.title = 'IND_REM:' + panelId;
+    };
+    panel.appendChild(closeBtn);
+
+    var canvas = document.createElement('canvas');
+    canvas.id = 'subcanvas-' + panelId;
+    canvas.className = 'sub-panel-canvas';
+    panel.appendChild(canvas);
+
+    container.appendChild(panel);
+
+    var dpr = window.devicePixelRatio || 1;
+    var rect = panel.getBoundingClientRect();
+    canvas.width = rect.width * dpr;
+    canvas.height = rect.height * dpr;
+    var ctx = canvas.getContext('2d');
+    ctx.scale(dpr, dpr);
+
+    subPanels[panelId] = {
+        config: config,
+        canvas: canvas,
+        ctx: ctx,
+        series: {},
+        yRange: config.yRange ? { min: config.yRange.min, max: config.yRange.max } : null,
+        visible: true,
+    };
+
+    _resizeMainChart();
+}
+
+function _resizeMainChart() {
+    // dxCharts needs to be told to resize after sub-panels change
+    if (chart && chart.updateData) {
+        try { chart.updateData({ candles: chart.data ? chart.data.dataItems : allCandles }); } catch(e) {}
+    }
+    // Resize sub-panel canvases
+    Object.keys(subPanels).forEach(function(pid) {
+        var sp = subPanels[pid];
+        var el = document.getElementById('subpanel-' + pid);
+        if (!el) return;
+        var dpr = window.devicePixelRatio || 1;
+        var rect = el.getBoundingClientRect();
+        if (rect.width > 0 && rect.height > 0) {
+            sp.canvas.width = rect.width * dpr;
+            sp.canvas.height = rect.height * dpr;
+            sp.ctx = sp.canvas.getContext('2d');
+            sp.ctx.scale(dpr, dpr);
+        }
+    });
+}
+
+/* ----- Sub-Panel Drawing ----- */
+
+function _drawAllSubPanels(mainBounds) {
+    var pids = Object.keys(subPanels);
+    if (pids.length === 0) return;
+
+    for (var i = 0; i < pids.length; i++) {
+        var pid = pids[i];
+        var sp = subPanels[pid];
+        if (!sp.visible || !sp.ctx) continue;
+
+        var dpr = window.devicePixelRatio || 1;
+        var w = sp.canvas.width / dpr;
+        var h = sp.canvas.height / dpr;
+        if (w <= 0 || h <= 0) continue;
+
+        // Auto-scale Y if no fixed range
+        _autoScaleSubPanel(pid, mainBounds);
+
+        sp.ctx.clearRect(0, 0, w, h);
+
+        // Background
+        sp.ctx.fillStyle = '#1a1a2e';
+        sp.ctx.fillRect(0, 0, w, h);
+
+        var panelBounds = {
+            x: mainBounds ? mainBounds.x : 0,
+            width: mainBounds ? mainBounds.width : w - 60,
+            y: 0, height: h,
+        };
+
+        // Grid
+        _drawSubGrid(sp, panelBounds, w, h);
+
+        // Reference lines
+        _drawSubRefLines(sp, panelBounds, w, h);
+
+        // Series
+        _drawSubSeries(sp, panelBounds, w, h);
+
+        // Y-axis
+        _drawSubYAxis(sp, w, h);
+
+        // Legend
+        _drawSubLegend(sp, panelBounds);
+    }
+}
+
+function _subToY(sp, value, h) {
+    if (!sp.yRange || sp.yRange.max === sp.yRange.min) return null;
+    var pad = 8;
+    var range = sp.yRange.max - sp.yRange.min;
+    return pad + (1 - (value - sp.yRange.min) / range) * (h - 2 * pad);
+}
+
+function _autoScaleSubPanel(pid, mainBounds) {
+    var sp = subPanels[pid];
+    if (sp.config.yRange) {
+        sp.yRange = { min: sp.config.yRange.min, max: sp.config.yRange.max };
+        return;
+    }
+    // Compute from visible data
+    var min = Infinity, max = -Infinity;
+    var seriesIds = Object.keys(sp.series);
+    for (var s = 0; s < seriesIds.length; s++) {
+        var data = sp.series[seriesIds[s]].data;
+        if (!data) continue;
+        for (var i = 0; i < data.length; i++) {
+            var pt = data[i];
+            var x = _toX(pt.timestamp);
+            if (x === null) continue;
+            if (mainBounds && (x < mainBounds.x || x > mainBounds.x + mainBounds.width)) continue;
+            if (pt.value < min) min = pt.value;
+            if (pt.value > max) max = pt.value;
+        }
+    }
+    if (min !== Infinity && max !== -Infinity) {
+        var pad = (max - min) * 0.1 || 1;
+        sp.yRange = { min: min - pad, max: max + pad };
+    } else {
+        sp.yRange = { min: 0, max: 1 };
+    }
+}
+
+function _drawSubGrid(sp, bounds, w, h) {
+    var ctx = sp.ctx;
+    if (!sp.yRange) return;
+    ctx.save();
+    ctx.strokeStyle = 'rgba(255,255,255,0.05)';
+    ctx.lineWidth = 1;
+    ctx.setLineDash([]);
+    var steps = 4;
+    for (var i = 0; i <= steps; i++) {
+        var val = sp.yRange.min + (sp.yRange.max - sp.yRange.min) * (i / steps);
+        var y = _subToY(sp, val, h);
+        if (y === null) continue;
+        ctx.beginPath();
+        ctx.moveTo(bounds.x, y);
+        ctx.lineTo(bounds.x + bounds.width, y);
+        ctx.stroke();
+    }
+    ctx.restore();
+}
+
+function _drawSubRefLines(sp, bounds, w, h) {
+    var ctx = sp.ctx;
+    var refs = sp.config.refLines || [];
+    for (var i = 0; i < refs.length; i++) {
+        var ref = refs[i];
+        var y = _subToY(sp, ref.value, h);
+        if (y === null) continue;
+        ctx.save();
+        ctx.strokeStyle = ref.color || '#555';
+        ctx.lineWidth = 1;
+        if (ref.style === 'dashed') ctx.setLineDash([4, 4]);
+        else ctx.setLineDash([]);
+        ctx.beginPath();
+        ctx.moveTo(bounds.x, y);
+        ctx.lineTo(bounds.x + bounds.width, y);
+        ctx.stroke();
+        // Label
+        ctx.font = '9px Consolas, monospace';
+        ctx.fillStyle = ref.color || '#555';
+        ctx.textAlign = 'right';
+        ctx.fillText(ref.value.toString(), bounds.x + bounds.width + 35, y + 3);
+        ctx.restore();
+    }
+}
+
+function _drawSubSeries(sp, bounds, w, h) {
+    var ctx = sp.ctx;
+    var seriesIds = Object.keys(sp.series);
+    for (var s = 0; s < seriesIds.length; s++) {
+        var series = sp.series[seriesIds[s]];
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(bounds.x, 0, bounds.width, h);
+        ctx.clip();
+
+        if (series.series_type === 'histogram') {
+            _drawSubHistogram(ctx, sp, series, bounds, h);
+        } else if (series.series_type === 'line') {
+            _drawSubLine(ctx, sp, series, bounds, h);
+        }
+        ctx.restore();
+    }
+}
+
+function _drawSubLine(ctx, sp, series, bounds, h) {
+    ctx.strokeStyle = series.color;
+    ctx.lineWidth = series.width || 1.5;
+    if (series.dash_style === 'dashed') ctx.setLineDash([6, 4]);
+    else if (series.dash_style === 'dotted') ctx.setLineDash([2, 3]);
+    else ctx.setLineDash([]);
+    ctx.beginPath();
+    var started = false;
+    for (var i = 0; i < series.data.length; i++) {
+        var pt = series.data[i];
+        var x = _toX(pt.timestamp);
+        var y = _subToY(sp, pt.value, h);
+        if (x === null || y === null) continue;
+        if (x < bounds.x || x > bounds.x + bounds.width) { started = false; continue; }
+        if (!started) { ctx.moveTo(x, y); started = true; }
+        else ctx.lineTo(x, y);
+    }
+    ctx.stroke();
+}
+
+function _drawSubHistogram(ctx, sp, series, bounds, h) {
+    var zeroY = _subToY(sp, 0, h);
+    if (zeroY === null) zeroY = h / 2;
+    var barW = Math.max(1, bounds.width / (series.data.length || 1) * 0.6);
+
+    for (var i = 0; i < series.data.length; i++) {
+        var pt = series.data[i];
+        var x = _toX(pt.timestamp);
+        var y = _subToY(sp, pt.value, h);
+        if (x === null || y === null) continue;
+        if (x < bounds.x || x > bounds.x + bounds.width) continue;
+
+        ctx.fillStyle = pt.value >= 0 ? '#26a69a' : '#ef5350';
+        var top = Math.min(y, zeroY);
+        var barH = Math.abs(y - zeroY);
+        ctx.fillRect(x - barW / 2, top, barW, Math.max(barH, 1));
+    }
+}
+
+function _drawSubYAxis(sp, w, h) {
+    var ctx = sp.ctx;
+    if (!sp.yRange) return;
+    ctx.save();
+    ctx.font = '9px Consolas, monospace';
+    ctx.fillStyle = '#888';
+    ctx.textAlign = 'right';
+    var steps = 4;
+    for (var i = 0; i <= steps; i++) {
+        var val = sp.yRange.min + (sp.yRange.max - sp.yRange.min) * (i / steps);
+        var y = _subToY(sp, val, h);
+        if (y === null) continue;
+        var txt = Math.abs(val) >= 1000 ? (val / 1000).toFixed(0) + 'k'
+                : Math.abs(val) >= 100 ? val.toFixed(0)
+                : val.toFixed(1);
+        ctx.fillText(txt, w - 4, y + 3);
+    }
+    ctx.restore();
+}
+
+function _drawSubLegend(sp, bounds) {
+    var ctx = sp.ctx;
+    var seriesIds = Object.keys(sp.series);
+    ctx.save();
+    ctx.font = '10px Consolas, monospace';
+    var x = bounds.x + 60;
+    for (var i = 0; i < seriesIds.length; i++) {
+        var s = sp.series[seriesIds[i]];
+        if (s.series_type === 'band_fill') continue;
+        ctx.fillStyle = s.color;
+        ctx.textAlign = 'left';
+        ctx.fillText(s.name, x, 12);
+        x += ctx.measureText(s.name).width + 12;
+    }
+    ctx.restore();
+}
+</script>
+</body>
+</html>

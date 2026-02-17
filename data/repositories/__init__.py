@@ -15,6 +15,7 @@ from canslim_monitor.data.repositories.market_config_repo import (
 )
 from canslim_monitor.data.repositories.history_repo import HistoryRepository
 from canslim_monitor.data.repositories.learning_repo import LearningRepository
+from canslim_monitor.data.repositories.provider_repo import ProviderRepository
 
 __all__ = [
     'PositionRepository',
@@ -26,6 +27,7 @@ __all__ = [
     'LearnedWeightsRepository',
     'HistoryRepository',
     'LearningRepository',
+    'ProviderRepository',
 ]
 
 
@@ -107,3 +109,10 @@ class RepositoryManager:
         if 'learning' not in self._repos:
             self._repos['learning'] = LearningRepository(self._session)
         return self._repos['learning']
+
+    @property
+    def providers(self) -> ProviderRepository:
+        """Get Provider repository."""
+        if 'providers' not in self._repos:
+            self._repos['providers'] = ProviderRepository(self._session)
+        return self._repos['providers']

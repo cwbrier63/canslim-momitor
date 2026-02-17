@@ -23,6 +23,7 @@ EMBED_COLORS = {
     'ADD': 0x2ECC71,       # Green
     'TECHNICAL': 0xE67E22, # Orange
     'HEALTH': 0xE67E22,    # Orange
+    'ALT_ENTRY': 0x2ECC71, # Green
     'CRITICAL': 0xE74C3C,  # Red (special case for critical health)
 }
 
@@ -46,9 +47,15 @@ POSITION_EMOJIS = {
     "PY2_EXTENDED": "\u2757\uFE0F",  # ❗
     "PULLBACK": "\U0001F3AF",        # 🎯
 
-    # Add Alerts
+    # Add Alerts (re-entry)
+    "EMA_21": "\U0001F3AF",          # 🎯
     "EMA_21_PULLBACK": "\U0001F3AF", # 🎯
     "MA_50_BOUNCE": "\U0001F3AF",    # 🎯
+    "IN_BUY_ZONE": "\U0001F50D",     # 🔍
+
+    # Alt Entry Alerts (watchlist)
+    "MA_BOUNCE": "\U0001F3AF",       # 🎯
+    "PIVOT_RETEST": "\U0001F504",    # 🔄
 
     # Technical Alerts
     "MA_50_WARNING": "\u26A1",       # ⚡
@@ -509,4 +516,70 @@ def build_health_embed(
         action=action,
         priority=priority,
         market_regime=market_regime,
+    )
+
+
+def build_add_embed(
+    symbol: str,
+    price: float,
+    entry_price: float,
+    pnl_pct: float,
+    subtype: str,  # EMA_21, PULLBACK, IN_BUY_ZONE
+    line2_data: str,
+    action: str,
+    ma_21: Optional[float] = None,
+    ma_50: Optional[float] = None,
+    days_in_position: int = 0,
+    market_regime: str = "",
+    priority: str = 'P2',
+    custom_title: Optional[str] = None,
+) -> str:
+    """Build embed for re-entry / add opportunity alerts."""
+    return build_position_embed(
+        alert_type='ADD',
+        subtype=subtype,
+        symbol=symbol,
+        price=price,
+        pnl_pct=pnl_pct,
+        entry_price=entry_price,
+        line2_data=line2_data,
+        ma_21=ma_21,
+        ma_50=ma_50,
+        days_in_position=days_in_position,
+        action=action,
+        priority=priority,
+        market_regime=market_regime,
+        custom_title=custom_title,
+    )
+
+
+def build_alt_entry_embed(
+    symbol: str,
+    price: float,
+    pivot_price: float,
+    subtype: str,  # MA_BOUNCE, PIVOT_RETEST
+    line2_data: str,
+    action: str,
+    ma_21: Optional[float] = None,
+    ma_50: Optional[float] = None,
+    market_regime: str = "",
+    priority: str = 'P1',
+    custom_title: Optional[str] = None,
+) -> str:
+    """Build embed for watchlist alternative entry alerts."""
+    return build_position_embed(
+        alert_type='ALT_ENTRY',
+        subtype=subtype,
+        symbol=symbol,
+        price=price,
+        pnl_pct=0,  # Watchlist items have no P&L
+        entry_price=pivot_price,
+        line2_data=line2_data,
+        ma_21=ma_21,
+        ma_50=ma_50,
+        days_in_position=0,
+        action=action,
+        priority=priority,
+        market_regime=market_regime,
+        custom_title=custom_title,
     )

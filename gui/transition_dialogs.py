@@ -1264,10 +1264,34 @@ class EditPositionDialog(QDialog):
         header.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(header)
         
+        # State Override
+        state_group = QGroupBox("Position State")
+        state_layout = QFormLayout()
+
+        self.state_combo = QComboBox()
+        # Populate with all states sorted by column_order
+        for state_info in sorted(STATES.values(), key=lambda s: s.column_order):
+            self.state_combo.addItem(
+                f"{state_info.display_name} ({state_info.value})",
+                state_info.value
+            )
+        state_layout.addRow("State:", self.state_combo)
+
+        state_warning = QLabel("Changing state directly bypasses transition validation. Use only to fix errors.")
+        state_warning.setWordWrap(True)
+        state_warning.setStyleSheet(
+            "background-color: #FFF3CD; color: #856404; padding: 4px 8px; "
+            "border: 1px solid #FFEEBA; border-radius: 3px; font-size: 11px;"
+        )
+        state_layout.addRow(state_warning)
+
+        state_group.setLayout(state_layout)
+        layout.addWidget(state_group)
+
         # Setup Information
         setup_group = QGroupBox("Setup Information")
         setup_layout = QFormLayout()
-        
+
         self.pattern_combo = QComboBox()
         self.pattern_combo.addItems([''] + VALID_PATTERNS)
         self.pattern_combo.setEditable(True)
@@ -1452,8 +1476,12 @@ class EditPositionDialog(QDialog):
         self.e1_price_input.setPrefix("$")
         e1_row.addWidget(QLabel("Price:"))
         e1_row.addWidget(self.e1_price_input)
+        self.e1_date_input = QDateEdit()
+        self.e1_date_input.setCalendarPopup(True)
+        self.e1_date_input.setSpecialValueText("Not Set")
+        e1_row.addWidget(self.e1_date_input)
         position_layout.addRow("Entry 1:", e1_row)
-        
+
         # Entry 2
         e2_row = QHBoxLayout()
         self.e2_shares_input = QSpinBox()
@@ -1466,8 +1494,12 @@ class EditPositionDialog(QDialog):
         self.e2_price_input.setPrefix("$")
         e2_row.addWidget(QLabel("Price:"))
         e2_row.addWidget(self.e2_price_input)
+        self.e2_date_input = QDateEdit()
+        self.e2_date_input.setCalendarPopup(True)
+        self.e2_date_input.setSpecialValueText("Not Set")
+        e2_row.addWidget(self.e2_date_input)
         position_layout.addRow("Entry 2:", e2_row)
-        
+
         # Entry 3
         e3_row = QHBoxLayout()
         self.e3_shares_input = QSpinBox()
@@ -1480,6 +1512,10 @@ class EditPositionDialog(QDialog):
         self.e3_price_input.setPrefix("$")
         e3_row.addWidget(QLabel("Price:"))
         e3_row.addWidget(self.e3_price_input)
+        self.e3_date_input = QDateEdit()
+        self.e3_date_input.setCalendarPopup(True)
+        self.e3_date_input.setSpecialValueText("Not Set")
+        e3_row.addWidget(self.e3_date_input)
         position_layout.addRow("Entry 3:", e3_row)
         
         position_group.setLayout(position_layout)
@@ -1549,6 +1585,31 @@ class EditPositionDialog(QDialog):
             "EARNINGS", "NEWS", "MARKET_CORRECTION", "OTHER"
         ])
         exit_layout.addRow("Close Reason:", self.close_reason_combo)
+
+        # Position size summary (original vs open)
+        size_row = QHBoxLayout()
+        self.orig_shares_label = QLabel("0")
+        self.orig_shares_label.setStyleSheet("font-weight: bold; font-size: 13px; color: #333;")
+        size_row.addWidget(QLabel("Orig Shares:"))
+        size_row.addWidget(self.orig_shares_label)
+        size_row.addSpacing(12)
+        self.open_shares_label = QLabel("0")
+        self.open_shares_label.setStyleSheet("font-weight: bold; font-size: 13px; color: #333;")
+        size_row.addWidget(QLabel("Open:"))
+        size_row.addWidget(self.open_shares_label)
+        size_row.addSpacing(12)
+        self.avg_cost_label = QLabel("$0.00")
+        self.avg_cost_label.setStyleSheet("font-weight: bold; font-size: 13px; color: #333;")
+        size_row.addWidget(QLabel("Avg Cost:"))
+        size_row.addWidget(self.avg_cost_label)
+        size_row.addStretch()
+        exit_layout.addRow("Position:", size_row)
+
+        # Connect entry/TP spinners to update position summary
+        for spinner in [self.e1_shares_input, self.e2_shares_input, self.e3_shares_input,
+                        self.tp1_sold_input, self.tp2_sold_input,
+                        self.e1_price_input, self.e2_price_input, self.e3_price_input]:
+            spinner.valueChanged.connect(self._update_position_summary)
 
         # Realized P&L Display (calculated)
         pnl_row = QHBoxLayout()
@@ -1630,7 +1691,14 @@ class EditPositionDialog(QDialog):
     def _populate_fields(self):
         """Populate fields with current position data."""
         data = self.position_data
-        
+
+        # State
+        current_state = data.get('state', 0)
+        for i in range(self.state_combo.count()):
+            if self.state_combo.itemData(i) == current_state:
+                self.state_combo.setCurrentIndex(i)
+                break
+
         # Setup
         if data.get('pattern'):
             idx = self.pattern_combo.findText(data['pattern'])
@@ -1721,8 +1789,11 @@ class EditPositionDialog(QDialog):
             else:
                 self.close_reason_combo.setCurrentText(data['close_reason'])
 
-        # Dates (including exit dates)
+        # Dates (including entry and exit dates)
         for field, widget in [
+            ('e1_date', self.e1_date_input),
+            ('e2_date', self.e2_date_input),
+            ('e3_date', self.e3_date_input),
             ('watch_date', self.watch_date_input),
             ('breakout_date', self.breakout_date_input),
             ('earnings_date', self.earnings_date_input),
@@ -1732,6 +1803,8 @@ class EditPositionDialog(QDialog):
         ]:
             if data.get(field):
                 d = data[field]
+                if isinstance(d, str):
+                    d = date.fromisoformat(d)
                 if isinstance(d, date):
                     widget.setDate(QDate(d.year, d.month, d.day))
 
@@ -1740,8 +1813,40 @@ class EditPositionDialog(QDialog):
             self.notes_input.setPlainText(data['notes'])
 
         # Calculate and display P&L
+        self._update_position_summary()
         self._calculate_pnl()
-    
+
+    def _update_position_summary(self, _=None):
+        """Update the original vs open shares and avg cost display."""
+        e1_sh = self.e1_shares_input.value()
+        e2_sh = self.e2_shares_input.value()
+        e3_sh = self.e3_shares_input.value()
+        total = e1_sh + e2_sh + e3_sh
+        sold = self.tp1_sold_input.value() + self.tp2_sold_input.value()
+        remaining = max(0, total - sold)
+
+        self.orig_shares_label.setText(str(total))
+        self.open_shares_label.setText(str(remaining))
+
+        # Calculate weighted avg cost from entries
+        total_cost = 0.0
+        if e1_sh > 0:
+            total_cost += e1_sh * self.e1_price_input.value()
+        if e2_sh > 0:
+            total_cost += e2_sh * self.e2_price_input.value()
+        if e3_sh > 0:
+            total_cost += e3_sh * self.e3_price_input.value()
+        avg_cost = total_cost / total if total > 0 else 0.0
+        self.avg_cost_label.setText(f"${avg_cost:.2f}" if avg_cost > 0 else "$0.00")
+
+        # Color the open shares: green if still holding, gray if fully exited
+        if remaining > 0:
+            self.open_shares_label.setStyleSheet(
+                "font-weight: bold; font-size: 13px; color: #28A745;")
+        else:
+            self.open_shares_label.setStyleSheet(
+                "font-weight: bold; font-size: 13px; color: #6C757D;")
+
     def _calculate_pnl(self, _=None):
         """Calculate and display realized P&L based on close price."""
         pnl_pct, pnl_dollar = self._get_pnl_values()
@@ -1852,6 +1957,7 @@ class EditPositionDialog(QDialog):
 
         # Collect all fields
         self.result_data = {
+            'state': self.state_combo.currentData(),
             'pattern': self.pattern_combo.currentText() or None,
             'pivot': get_value(self.pivot_input),
             'stop_price': get_value(self.stop_price_input),
@@ -1905,8 +2011,11 @@ class EditPositionDialog(QDialog):
             self.result_data['realized_pnl'] = pnl_dollar
             self.result_data['realized_pnl_pct'] = pnl_pct
 
-        # Dates (including exit dates)
+        # Dates (including entry and exit dates)
         for field, widget in [
+            ('e1_date', self.e1_date_input),
+            ('e2_date', self.e2_date_input),
+            ('e3_date', self.e3_date_input),
             ('watch_date', self.watch_date_input),
             ('breakout_date', self.breakout_date_input),
             ('earnings_date', self.earnings_date_input),

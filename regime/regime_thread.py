@@ -71,7 +71,10 @@ class RegimeThread(BaseThread):
         ibkr_client=None,
         discord_notifier=None,
         config: Dict[str, Any] = None,
-        logger: Optional[logging.Logger] = None
+        logger: Optional[logging.Logger] = None,
+        # Provider abstraction layer (Phase 6)
+        historical_provider=None,
+        futures_provider=None,
     ):
         super().__init__(
             name="regime",
@@ -85,6 +88,10 @@ class RegimeThread(BaseThread):
         self.ibkr_client = ibkr_client
         self.discord_notifier = discord_notifier
         self.config = config or {}
+
+        # Provider abstraction layer — prefers providers over raw clients
+        self.historical_provider = historical_provider
+        self.futures_provider = futures_provider
         
         # Parse regime-specific config
         regime_config = self.config.get('market_regime', {})
@@ -215,9 +222,9 @@ class RegimeThread(BaseThread):
             now = datetime.now()
             tz_used = "local"
 
-        # Skip weekends
-        if now.weekday() >= 5:
-            self.logger.debug(f"Skipping - weekend (weekday={now.weekday()})")
+        # Skip weekends and holidays
+        if not self._is_trading_day():
+            self.logger.debug(f"Skipping - not a trading day (weekday={now.weekday()})")
             return False
 
         # Parse alert time
@@ -319,24 +326,9 @@ class RegimeThread(BaseThread):
         try:
             # Step 1: Fetch historical data
             self.logger.info(f"Fetching market data (use_indices={self.use_indices})...")
-            
-            # Try to use our config for API key
-            api_config = {
-                'polygon': {
-                    'api_key': self.config.get('market_data', {}).get('api_key') or 
-                               self.config.get('polygon', {}).get('api_key')
-                }
-            }
-            
-            data = fetch_spy_qqq_daily(
-                lookback_days=35,
-                config=api_config,
-                use_indices=self.use_indices
-            )
-            
-            spy_bars = data.get('SPY', [])
-            qqq_bars = data.get('QQQ', [])
-            
+
+            spy_bars, qqq_bars = self._fetch_market_bars()
+
             if not spy_bars or not qqq_bars:
                 self.logger.error("Failed to fetch market data")
                 return None
@@ -469,31 +461,84 @@ class RegimeThread(BaseThread):
             self.logger.error(f"Error in regime analysis: {e}", exc_info=True)
             return None
     
+    def _fetch_market_bars(self):
+        """Fetch SPY/QQQ daily bars via historical provider (or legacy fallback).
+
+        Returns:
+            (spy_bars, qqq_bars) — lists of DailyBar objects.
+        """
+        # Prefer provider abstraction — uses throttled, health-tracked connection
+        if self.historical_provider and self.historical_provider.is_connected():
+            try:
+                spy_raw = self.historical_provider.get_daily_bars('SPY', days=35)
+                qqq_raw = self.historical_provider.get_daily_bars('QQQ', days=35)
+
+                # Convert canonical Bar → DailyBar for regime components
+                spy_bars = [
+                    DailyBar(date=b.bar_date, open=b.open, high=b.high,
+                             low=b.low, close=b.close, volume=b.volume)
+                    for b in spy_raw
+                ]
+                qqq_bars = [
+                    DailyBar(date=b.bar_date, open=b.open, high=b.high,
+                             low=b.low, close=b.close, volume=b.volume)
+                    for b in qqq_raw
+                ]
+                self.logger.info(
+                    f"Fetched via historical provider: {len(spy_bars)} SPY, {len(qqq_bars)} QQQ bars"
+                )
+                return spy_bars, qqq_bars
+            except Exception as e:
+                self.logger.warning(f"Historical provider failed: {e}, falling back to legacy fetch")
+
+        # Legacy fallback — creates its own MassiveHistoricalClient from config
+        api_config = {
+            'polygon': {
+                'api_key': self.config.get('market_data', {}).get('api_key') or
+                           self.config.get('polygon', {}).get('api_key')
+            }
+        }
+        data = fetch_spy_qqq_daily(
+            lookback_days=35,
+            config=api_config,
+            use_indices=self.use_indices
+        )
+        return data.get('SPY', []), data.get('QQQ', [])
+
     def _get_overnight_data(self) -> OvernightData:
-        """
-        Get overnight futures data.
-        
-        Uses IBKR client if available, otherwise returns neutral.
-        """
-        # Default to neutral if no IBKR
+        """Get overnight futures data via futures provider (or IBKR fallback)."""
+        # Prefer provider abstraction
+        if self.futures_provider and self.futures_provider.is_connected():
+            try:
+                snapshot = self.futures_provider.get_futures_snapshot()
+                self.logger.info(
+                    f"Overnight futures (provider): ES={snapshot.es_change:+.2f}%, "
+                    f"NQ={snapshot.nq_change:+.2f}%, YM={snapshot.ym_change:+.2f}%"
+                )
+                return create_overnight_data(
+                    snapshot.es_change, snapshot.nq_change, snapshot.ym_change
+                )
+            except Exception as e:
+                self.logger.warning(f"Futures provider failed: {e}, falling back to raw client")
+
+        # Legacy fallback — direct IBKR client
         if not self.ibkr_client:
             self.logger.debug("No IBKR client - skipping futures data")
             return create_overnight_data(0.0, 0.0, 0.0)
-        
+
         if not self.ibkr_client.is_connected():
             self.logger.warning("IBKR not connected - skipping futures data")
             return create_overnight_data(0.0, 0.0, 0.0)
-        
+
         try:
-            # Try to get futures data from IBKR
             from .ibkr_futures import get_futures_snapshot
-            
+
             es_change, nq_change, ym_change = get_futures_snapshot(self.ibkr_client)
-            
+
             self.logger.info(f"Overnight futures: ES={es_change:+.2f}%, NQ={nq_change:+.2f}%, YM={ym_change:+.2f}%")
-            
+
             return create_overnight_data(es_change, nq_change, ym_change)
-            
+
         except ImportError as e:
             self.logger.warning(f"ibkr_futures module not available: {e}")
             return create_overnight_data(0.0, 0.0, 0.0)

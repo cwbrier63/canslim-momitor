@@ -13,7 +13,7 @@ Usage:
 
 import logging
 import requests
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import List, Dict, Optional, Any
 from dataclasses import dataclass
 from time import sleep
@@ -167,7 +167,8 @@ class PolygonClient:
         for r in results:
             try:
                 # Polygon returns timestamp in milliseconds
-                bar_date = datetime.fromtimestamp(r['t'] / 1000).date()
+                # Use UTC to avoid timezone shift (Polygon timestamps are midnight UTC)
+                bar_date = datetime.fromtimestamp(r['t'] / 1000, tz=timezone.utc).date()
                 
                 bar = Bar(
                     symbol=symbol.upper(),
@@ -199,6 +200,124 @@ class PolygonClient:
         self.logger.debug(f"Fetched {len(bars)} bars for {symbol}")
         return bars
     
+    def get_bars(
+        self,
+        symbol: str,
+        timeframe: str = "day",
+        count: int = 252,
+        end_date: date = None,
+    ) -> List[Bar]:
+        """
+        Get OHLCV bars at any supported resolution.
+
+        Args:
+            symbol: Stock symbol
+            timeframe: One of "week", "day", "hour", "30min"
+            count: Approximate number of bars to return
+            end_date: End date (defaults to yesterday for daily+)
+
+        Returns:
+            List of Bar objects, oldest first
+        """
+        # Map timeframe to Polygon API multiplier/timespan
+        tf_map = {
+            "week":  (1, "week"),
+            "day":   (1, "day"),
+            "hour":  (1, "hour"),
+            "30min": (30, "minute"),
+        }
+        multiplier, timespan = tf_map.get(timeframe, (1, "day"))
+
+        # Calculate date range
+        if end_date is None:
+            # Intraday: use today so we capture the latest bars
+            # Daily/weekly: use yesterday (end-of-day data)
+            if timeframe in ("hour", "30min"):
+                end_date = date.today()
+            else:
+                end_date = date.today() - timedelta(days=1)
+
+        if timeframe in ("hour", "30min"):
+            # Intraday: Polygon includes extended-hours bars (~12-16/day),
+            # so use a generous per-day estimate and sort desc to always
+            # get the most recent data first.
+            bars_per_day = {"hour": 14, "30min": 26}[timeframe]
+            cal_days = max(int(count / bars_per_day * 1.5) + 5, 10)
+            start_date = end_date - timedelta(days=cal_days)
+            limit = count + 50
+            sort_order = 'desc'   # newest first — reversed after parsing
+        elif timeframe == "week":
+            start_date = end_date - timedelta(weeks=int(count * 1.2) + 4)
+            limit = count + 10
+            sort_order = 'asc'
+        else:
+            start_date = end_date - timedelta(days=int(count * 1.5) + 10)
+            limit = count + 20
+            sort_order = 'asc'
+
+        endpoint = (
+            f"/v2/aggs/ticker/{symbol.upper()}/range/"
+            f"{multiplier}/{timespan}/"
+            f"{start_date.isoformat()}/{end_date.isoformat()}"
+        )
+
+        params = {
+            'adjusted': 'true',
+            'sort': sort_order,
+            'limit': limit,
+        }
+
+        response = self._make_request(endpoint, params)
+        if not response:
+            return []
+
+        if response.get('status') != 'OK' and response.get('resultsCount', 0) == 0:
+            self.logger.warning(f"No {timeframe} data returned for {symbol}")
+            return []
+
+        results = response.get('results', [])
+        bars = []
+
+        for r in results:
+            try:
+                bar_date = datetime.fromtimestamp(r['t'] / 1000, tz=timezone.utc).date()
+                bar = Bar(
+                    symbol=symbol.upper(),
+                    bar_date=bar_date,
+                    open=r.get('o', 0),
+                    high=r.get('h', 0),
+                    low=r.get('l', 0),
+                    close=r.get('c', 0),
+                    volume=int(r.get('v', 0)),
+                    vwap=r.get('vw'),
+                    transactions=r.get('n'),
+                )
+                # For intraday bars, store the full timestamp so the chart
+                # can render hour/minute labels correctly.
+                bar._timestamp_ms = r['t']
+                bars.append(bar)
+            except Exception as e:
+                self.logger.warning(f"Error parsing {timeframe} bar for {symbol}: {e}")
+                continue
+
+        # Intraday was fetched newest-first (desc) — reverse to oldest-first
+        if sort_order == 'desc':
+            bars.reverse()
+
+        if len(bars) > count:
+            bars = bars[-count:]
+
+        # Clean daily/weekly bars only (intraday doesn't need it)
+        if timeframe in ("day", "week"):
+            try:
+                from canslim_monitor.utils.data_cleaner import clean_daily_bars
+                bars = clean_daily_bars(bars)
+            except Exception:
+                pass
+
+        self.logger.debug(f"Fetched {len(bars)} {timeframe} bars for {symbol}")
+        return bars
+
     def get_multiple_symbols(
         self,
         symbols: List[str],
@@ -252,10 +371,88 @@ class PolygonClient:
         total_volume = sum(b.volume for b in recent_bars)
         return int(total_volume / len(recent_bars))
     
+    def get_snapshot(self, symbol: str) -> Optional[Dict[str, Any]]:
+        """
+        Get a real-time (15-min delayed on Starter) snapshot for a single ticker.
+
+        Uses ``/v2/snapshot/locale/us/markets/stocks/tickers/{ticker}``.
+
+        Returns:
+            Dict with keys: last, open, high, low, volume, avg_volume,
+            prev_close, change, change_pct, vwap, timestamp.
+            None if unavailable or endpoint not authorized.
+        """
+        symbol = symbol.upper()
+        endpoint = f"/v2/snapshot/locale/us/markets/stocks/tickers/{symbol}"
+        response = self._make_request(endpoint)
+
+        if not response or response.get('status') != 'OK':
+            self.logger.debug(f"{symbol}: Snapshot endpoint returned {response}")
+            return None
+
+        ticker = response.get('ticker', {})
+        day = ticker.get('day', {})
+        prev = ticker.get('prevDay', {})
+        last_trade = ticker.get('lastTrade', {})
+        minute = ticker.get('min', {})
+
+        last_price = last_trade.get('p', 0) or minute.get('c', 0) or day.get('c', 0)
+        if last_price <= 0:
+            return None
+
+        return {
+            'symbol': symbol,
+            'last': last_price,
+            'open': day.get('o', 0),
+            'high': day.get('h', 0),
+            'low': day.get('l', 0),
+            'volume': day.get('v', 0),
+            'vwap': day.get('vw', 0),
+            'avg_volume': prev.get('v', 0),
+            'prev_close': prev.get('c', 0),
+            'change': ticker.get('todaysChange', 0),
+            'change_pct': ticker.get('todaysChangePerc', 0),
+            'timestamp': last_trade.get('t'),
+        }
+
+    def get_previous_close(self, symbol: str) -> Optional[Dict[str, Any]]:
+        """
+        Get previous day's OHLCV data.
+
+        Uses ``/v2/aggs/ticker/{ticker}/prev`` — available on all tiers.
+
+        Returns:
+            Dict with keys: symbol, open, high, low, close, volume, vwap.
+            None if unavailable.
+        """
+        symbol = symbol.upper()
+        endpoint = f"/v2/aggs/ticker/{symbol}/prev"
+        params = {'adjusted': 'true'}
+
+        response = self._make_request(endpoint, params)
+
+        if not response or response.get('status') != 'OK':
+            return None
+
+        results = response.get('results', [])
+        if not results:
+            return None
+
+        bar = results[0]
+        return {
+            'symbol': symbol,
+            'open': bar.get('o', 0),
+            'high': bar.get('h', 0),
+            'low': bar.get('l', 0),
+            'close': bar.get('c', 0),
+            'volume': bar.get('v', 0),
+            'vwap': bar.get('vw', 0),
+        }
+
     def test_connection(self) -> bool:
         """
         Test API connection with a simple request.
-        
+
         Returns:
             True if connection successful
         """
@@ -270,6 +467,52 @@ class PolygonClient:
             self.logger.error("Polygon API connection failed")
             return False
     
+    # SIC major-group → sector mapping
+    _SIC_SECTORS = {
+        range(100, 1000): 'Agriculture',
+        range(1000, 1500): 'Mining',
+        range(1500, 1800): 'Construction',
+        range(2000, 4000): 'Manufacturing',
+        range(4000, 5000): 'Transportation',
+        range(5000, 5200): 'Wholesale',
+        range(5200, 6000): 'Retail',
+        range(6000, 6800): 'Finance',
+        range(7000, 9000): 'Services',
+        range(9100, 10000): 'Government',
+    }
+
+    def get_ticker_details(self, symbol: str) -> Optional[Dict]:
+        """Fetch company name, industry (SIC description), and sector from Polygon.
+
+        Returns dict with keys: name, industry, sector, sic_code, market_cap
+        or None on failure.
+        """
+        endpoint = f"/v3/reference/tickers/{symbol}"
+        response = self._make_request(endpoint)
+        if not response or response.get('status') != 'OK':
+            return None
+
+        r = response.get('results', {})
+        sic_code = r.get('sic_code', '')
+        sector = None
+        if sic_code:
+            try:
+                sic_int = int(sic_code)
+                for rng, name in self._SIC_SECTORS.items():
+                    if sic_int in rng:
+                        sector = name
+                        break
+            except (ValueError, TypeError):
+                pass
+
+        return {
+            'name': r.get('name'),
+            'industry': r.get('sic_description'),
+            'sector': sector,
+            'sic_code': sic_code,
+            'market_cap': r.get('market_cap'),
+        }
+
     def get_next_earnings_date(self, symbol: str) -> Optional[date]:
         """
         Get the next earnings date for a symbol.

@@ -17,6 +17,7 @@ import logging
 
 from canslim_monitor.data.models import Position
 from canslim_monitor.services.alert_service import AlertType, AlertSubtype, AlertData
+from canslim_monitor.utils.discord_formatters import build_alt_entry_embed
 
 from .base_checker import BaseChecker, PositionContext
 
@@ -170,16 +171,19 @@ class WatchlistAltEntryChecker(BaseChecker):
         # First/second test is highest probability
         probability = "HIGH" if test_count <= 2 else "MODERATE"
 
-        message = (
-            f"WATCHLIST ALT ENTRY - 21 EMA PULLBACK\n\n"
-            f"Price: {self.format_price(context.current_price)}\n"
-            f"21 EMA: {self.format_price(context.ma_21)} ({pct_from_21ema:+.1f}%)\n"
-            f"Pivot: {self.format_price(pivot)}\n"
-            f"Volume: {context.volume_ratio:.1f}x average\n\n"
-            f"MA Test: #{test_count} ({probability} probability)\n\n"
-            f"IBD Rule: After extending from pivot, pullbacks to\n"
-            f"21 EMA offer lower-risk entries with defined stops.\n\n"
-            f"Stop: Just below 21 EMA (~1-2%)"
+        line2 = f"21 EMA: ${context.ma_21:.2f} ({pct_from_21ema:+.1f}%) | Test #{test_count} ({probability})"
+        message = build_alt_entry_embed(
+            symbol=context.symbol,
+            price=context.current_price,
+            pivot_price=pivot,
+            subtype='MA_BOUNCE',
+            line2_data=line2,
+            action=f"BUY - 21 EMA pullback (Test #{test_count})",
+            ma_21=context.ma_21,
+            ma_50=context.ma_50,
+            market_regime=context.market_regime,
+            priority='P1',
+            custom_title=f"ALT ENTRY - 21 EMA: {context.symbol}",
         )
 
         self.set_cooldown(context.symbol, AlertSubtype.MA_BOUNCE)
@@ -236,16 +240,19 @@ class WatchlistAltEntryChecker(BaseChecker):
 
         probability = "HIGH" if test_count <= 2 else "MODERATE"
 
-        message = (
-            f"WATCHLIST ALT ENTRY - 50 MA PULLBACK\n\n"
-            f"Price: {self.format_price(context.current_price)}\n"
-            f"50 MA: {self.format_price(context.ma_50)} ({pct_from_50ma:+.1f}%)\n"
-            f"Pivot: {self.format_price(pivot)}\n"
-            f"Volume: {context.volume_ratio:.1f}x average\n\n"
-            f"MA Test: #{test_count} ({probability} probability)\n\n"
-            f"IBD Rule: The 50-day MA is the most important support.\n"
-            f"First/second test after breakout = high probability entry.\n\n"
-            f"Stop: Just below 50 MA (~1-2%)"
+        line2 = f"50 MA: ${context.ma_50:.2f} ({pct_from_50ma:+.1f}%) | Test #{test_count} ({probability})"
+        message = build_alt_entry_embed(
+            symbol=context.symbol,
+            price=context.current_price,
+            pivot_price=pivot,
+            subtype='MA_BOUNCE',
+            line2_data=line2,
+            action=f"BUY - 50 MA pullback (Test #{test_count})",
+            ma_21=context.ma_21,
+            ma_50=context.ma_50,
+            market_regime=context.market_regime,
+            priority='P1',
+            custom_title=f"ALT ENTRY - 50 MA: {context.symbol}",
         )
 
         # Set cooldown
@@ -285,15 +292,19 @@ class WatchlistAltEntryChecker(BaseChecker):
 
         buy_zone_top = pivot * (1 + 0.05)  # 5% buy zone
 
-        message = (
-            f"WATCHLIST ALT ENTRY - PIVOT RETEST\n\n"
-            f"Price: {self.format_price(context.current_price)}\n"
-            f"Pivot: {self.format_price(pivot)} ({pct_from_pivot:+.1f}%)\n"
-            f"Buy Zone: {self.format_price(pivot)} - {self.format_price(buy_zone_top)}\n"
-            f"Volume: {context.volume_ratio:.1f}x average\n\n"
-            f"After extending, price has returned to the original\n"
-            f"pivot zone. This is a second chance entry.\n\n"
-            f"Stop: 7-8% below pivot"
+        line2 = f"Pivot: ${pivot:.2f} ({pct_from_pivot:+.1f}%) | Zone: ${pivot:.2f}-${buy_zone_top:.2f}"
+        message = build_alt_entry_embed(
+            symbol=context.symbol,
+            price=context.current_price,
+            pivot_price=pivot,
+            subtype='PIVOT_RETEST',
+            line2_data=line2,
+            action="BUY - Pivot retest entry",
+            ma_21=context.ma_21,
+            ma_50=context.ma_50,
+            market_regime=context.market_regime,
+            priority='P1',
+            custom_title=f"ALT ENTRY - PIVOT RETEST: {context.symbol}",
         )
 
         self.set_cooldown(context.symbol, AlertSubtype.PIVOT_RETEST)

@@ -16,6 +16,7 @@ import logging
 
 from canslim_monitor.data.models import Position
 from canslim_monitor.services.alert_service import AlertType, AlertSubtype, AlertData
+from canslim_monitor.utils.discord_formatters import build_add_embed
 
 from .base_checker import BaseChecker, PositionContext
 
@@ -128,20 +129,21 @@ class ReentryChecker(BaseChecker):
         if context.volume_ratio < self.bounce_volume_min:
             return None
         
-        message = (
-            f"📈 21 EMA BOUNCE - ADD OPPORTUNITY\n\n"
-            f"Price: {self.format_price(context.current_price)}\n"
-            f"21 EMA: {self.format_price(context.ma_21)}\n"
-            f"Distance: {pct_from_21ema:+.1f}%\n"
-            f"Volume: {context.volume_ratio:.1f}x average\n\n"
-            f"Current P&L: {self.format_pct(context.pnl_pct)}\n"
-            f"State: {context.state} (room to add)\n\n"
-            f"▶ POTENTIAL ADD POINT\n\n"
-            f"IBD Rule: In strong uptrends, pullbacks to 21 EMA\n"
-            f"can be excellent add points. Confirm with:\n"
-            f"• Volume increasing on bounce\n"
-            f"• Market in confirmed uptrend\n"
-            f"• RS line holding up"
+        line2 = f"21 EMA: ${context.ma_21:.2f} ({pct_from_21ema:+.1f}%) | Vol: {context.volume_ratio:.1f}x"
+        message = build_add_embed(
+            symbol=context.symbol,
+            price=context.current_price,
+            entry_price=context.entry_price,
+            pnl_pct=context.pnl_pct,
+            subtype='EMA_21',
+            line2_data=line2,
+            action="Consider add - 21 EMA bounce",
+            ma_21=context.ma_21,
+            ma_50=context.ma_50,
+            days_in_position=context.days_in_position,
+            market_regime=context.market_regime,
+            priority='P2',
+            custom_title=f"21 EMA BOUNCE: {context.symbol}",
         )
         
         self.set_cooldown(context.symbol, AlertSubtype.EMA_21)
@@ -188,19 +190,21 @@ class ReentryChecker(BaseChecker):
         if context.volume_ratio < 1.2:  # Want above average volume
             return None
         
-        message = (
-            f"📈 50 MA BOUNCE - ADD OPPORTUNITY\n\n"
-            f"Price: {self.format_price(context.current_price)}\n"
-            f"50 MA: {self.format_price(context.ma_50)}\n"
-            f"Distance: +{pct_from_50ma:.1f}% above 50 MA\n"
-            f"Volume: {context.volume_ratio:.1f}x average\n\n"
-            f"Current P&L: {self.format_pct(context.pnl_pct)}\n"
-            f"State: {context.state} (room to add)\n\n"
-            f"▶ STRONG ADD OPPORTUNITY\n\n"
-            f"IBD Rule: 50 MA bounces with volume are high-probability\n"
-            f"add points. The 50 MA acts as institutional support.\n"
-            f"• Best when market is in confirmed uptrend\n"
-            f"• Use smaller add size than initial entry"
+        line2 = f"50 MA: ${context.ma_50:.2f} (+{pct_from_50ma:.1f}%) | Vol: {context.volume_ratio:.1f}x"
+        message = build_add_embed(
+            symbol=context.symbol,
+            price=context.current_price,
+            entry_price=context.entry_price,
+            pnl_pct=context.pnl_pct,
+            subtype='PULLBACK',
+            line2_data=line2,
+            action="Add - 50 MA bounce with volume",
+            ma_21=context.ma_21,
+            ma_50=context.ma_50,
+            days_in_position=context.days_in_position,
+            market_regime=context.market_regime,
+            priority='P1',
+            custom_title=f"50 MA BOUNCE: {context.symbol}",
         )
         
         self.set_cooldown(context.symbol, AlertSubtype.PULLBACK)
@@ -239,19 +243,21 @@ class ReentryChecker(BaseChecker):
         if context.max_gain_pct < 5.0:
             return None
         
-        message = (
-            f"🔄 PIVOT RETEST - ADD OPPORTUNITY\n\n"
-            f"Price: {self.format_price(context.current_price)}\n"
-            f"Pivot: {self.format_price(context.pivot_price)}\n"
-            f"Distance: +{pct_from_pivot:.1f}% above pivot\n\n"
-            f"Max Gain Was: +{context.max_gain_pct:.1f}%\n"
-            f"Current P&L: {self.format_pct(context.pnl_pct)}\n\n"
-            f"▶ SECOND-CHANCE ENTRY\n\n"
-            f"IBD Rule: Many successful breakouts pull back to\n"
-            f"test the pivot point. This retest can be a lower-risk\n"
-            f"entry point with a tighter stop.\n"
-            f"• Set stop just below pivot\n"
-            f"• Smaller position size than initial"
+        line2 = f"Pivot: ${context.pivot_price:.2f} (+{pct_from_pivot:.1f}%) | Max gain: +{context.max_gain_pct:.1f}%"
+        message = build_add_embed(
+            symbol=context.symbol,
+            price=context.current_price,
+            entry_price=context.entry_price,
+            pnl_pct=context.pnl_pct,
+            subtype='IN_BUY_ZONE',
+            line2_data=line2,
+            action="Consider add - pivot retest",
+            ma_21=context.ma_21,
+            ma_50=context.ma_50,
+            days_in_position=context.days_in_position,
+            market_regime=context.market_regime,
+            priority='P2',
+            custom_title=f"PIVOT RETEST: {context.symbol}",
         )
         
         self.set_cooldown(context.symbol, AlertSubtype.IN_BUY_ZONE)
@@ -294,21 +300,22 @@ class ReentryChecker(BaseChecker):
         if pct_from_pivot <= self.pivot_retest_pct:
             return None
         
-        message = (
-            f"📍 PULLBACK TO BUY ZONE\n\n"
-            f"Price: {self.format_price(context.current_price)}\n"
-            f"Pivot: {self.format_price(context.pivot_price)}\n"
-            f"Buy Zone: {self.format_price(context.pivot_price)} - "
-            f"{self.format_price(context.pivot_price * 1.05)}\n"
-            f"Current Position: +{pct_from_pivot:.1f}% above pivot\n\n"
-            f"Max Gain Was: +{context.max_gain_pct:.1f}%\n"
-            f"Current P&L: {self.format_pct(context.pnl_pct)}\n\n"
-            f"▶ ADD OPPORTUNITY\n\n"
-            f"Stock pulled back from extended levels into\n"
-            f"the optimal buy zone. Consider adding if:\n"
-            f"• Volume is constructive (not heavy selling)\n"
-            f"• Market is supportive\n"
-            f"• RS line holding up"
+        buy_zone_top = context.pivot_price * 1.05
+        line2 = f"Buy zone: ${context.pivot_price:.2f}-${buy_zone_top:.2f} (+{pct_from_pivot:.1f}%) | Max: +{context.max_gain_pct:.1f}%"
+        message = build_add_embed(
+            symbol=context.symbol,
+            price=context.current_price,
+            entry_price=context.entry_price,
+            pnl_pct=context.pnl_pct,
+            subtype='PULLBACK',
+            line2_data=line2,
+            action="Consider add - pullback to buy zone",
+            ma_21=context.ma_21,
+            ma_50=context.ma_50,
+            days_in_position=context.days_in_position,
+            market_regime=context.market_regime,
+            priority='P2',
+            custom_title=f"PULLBACK TO BUY ZONE: {context.symbol}",
         )
         
         self.set_cooldown(context.symbol, AlertSubtype.PULLBACK)

@@ -593,19 +593,22 @@ class KanbanColumn(QFrame):
 class ClosedPositionsPanel(QFrame):
     """
     Panel for displaying closed/stopped positions (collapsed by default).
+    Cards have fixed width and scroll horizontally. Includes a symbol filter.
     """
-    
+
     card_clicked = pyqtSignal(int)
     card_double_clicked = pyqtSignal(int)
     card_context_menu = pyqtSignal(int, object)  # position_id, QPoint
     card_alert_clicked = pyqtSignal(int, int)  # alert_id, position_id
-    
+
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.cards: List[PositionCard] = []
+        self.cards: List[PositionCard] = []       # visible (filtered) cards
+        self._all_cards: List[PositionCard] = []   # all cards before filtering
         self._expanded = False
+        self._symbol_filter = ""
         self._setup_ui()
-    
+
     def _setup_ui(self):
         """Set up the panel UI."""
         self.setStyleSheet("""
@@ -615,28 +618,28 @@ class ClosedPositionsPanel(QFrame):
                 border-radius: 4px;
             }
         """)
-        
+
         layout = QVBoxLayout(self)
         layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(4)
-        
+
         # Header (clickable to expand/collapse)
         header = QHBoxLayout()
-        
+
         self.expand_btn = QPushButton("▶")
         self.expand_btn.setFixedSize(20, 20)
         self.expand_btn.setStyleSheet("border: none;")
         self.expand_btn.clicked.connect(self._toggle_expand)
         header.addWidget(self.expand_btn)
-        
+
         title = QLabel("Closed Positions")
         title_font = QFont()
         title_font.setBold(True)
         title.setFont(title_font)
         header.addWidget(title)
-        
+
         header.addStretch()
-        
+
         self.count_label = QLabel("0")
         self.count_label.setStyleSheet("""
             background-color: #6C757D;
@@ -646,45 +649,110 @@ class ClosedPositionsPanel(QFrame):
             font-size: 11px;
         """)
         header.addWidget(self.count_label)
-        
+
         layout.addLayout(header)
-        
-        # Card container (initially hidden)
+
+        # Expandable content container (filter + scroll area)
+        self._content_widget = QWidget()
+        self._content_widget.setVisible(False)
+        content_layout = QVBoxLayout(self._content_widget)
+        content_layout.setContentsMargins(0, 4, 0, 0)
+        content_layout.setSpacing(4)
+
+        # Symbol filter input
+        self.symbol_filter_input = QLineEdit()
+        self.symbol_filter_input.setPlaceholderText("Filter by symbol...")
+        self.symbol_filter_input.setStyleSheet("""
+            QLineEdit {
+                border: 1px solid #CED4DA;
+                border-radius: 3px;
+                padding: 3px 6px;
+                background: white;
+                font-size: 11px;
+            }
+        """)
+        self.symbol_filter_input.textChanged.connect(self._on_symbol_filter_changed)
+        content_layout.addWidget(self.symbol_filter_input)
+
+        # Scroll area for cards (horizontal scrolling)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setFixedHeight(170)
+        scroll.setStyleSheet("""
+            QScrollArea {
+                border: none;
+                background-color: transparent;
+            }
+            QScrollArea > QWidget > QWidget {
+                background-color: transparent;
+            }
+        """)
+
+        # Card container inside scroll area
         self.card_container = QWidget()
-        self.card_container.setVisible(False)
         self.card_layout = QHBoxLayout(self.card_container)
-        self.card_layout.setContentsMargins(0, 4, 0, 0)
+        self.card_layout.setContentsMargins(0, 0, 0, 0)
         self.card_layout.setSpacing(8)
-        
-        layout.addWidget(self.card_container)
-    
+        self.card_layout.addStretch()
+
+        scroll.setWidget(self.card_container)
+        content_layout.addWidget(scroll)
+
+        layout.addWidget(self._content_widget)
+
     def _toggle_expand(self):
         """Toggle expanded/collapsed state."""
         self._expanded = not self._expanded
-        self.card_container.setVisible(self._expanded)
+        self._content_widget.setVisible(self._expanded)
         self.expand_btn.setText("▼" if self._expanded else "▶")
-    
+
+    def _on_symbol_filter_changed(self, text: str):
+        """Handle symbol filter text change."""
+        self._symbol_filter = text.upper().strip()
+        self._apply_filter()
+
+    def _apply_filter(self):
+        """Apply symbol filter to cards."""
+        visible_cards = []
+        for card in self._all_cards:
+            matches = not self._symbol_filter or self._symbol_filter in card.symbol.upper()
+            card.setVisible(matches)
+            if matches:
+                visible_cards.append(card)
+        self.cards = visible_cards
+        self._update_count()
+
     def add_card(self, card: PositionCard):
         """Add a position card."""
         card.clicked.connect(self.card_clicked.emit)
         card.double_clicked.connect(self.card_double_clicked.emit)
         card.context_menu_requested.connect(self.card_context_menu.emit)
         card.alert_clicked.connect(self.card_alert_clicked.emit)
-        card.setMaximumWidth(200)
-        
-        self.card_layout.addWidget(card)
-        self.cards.append(card)
-        self._update_count()
-    
+        card.setFixedWidth(200)
+        card.setMinimumWidth(200)
+
+        # Insert before the stretch at the end
+        self.card_layout.insertWidget(self.card_layout.count() - 1, card)
+        self._all_cards.append(card)
+        self._apply_filter()
+
     def clear_cards(self):
         """Remove all cards."""
-        for card in self.cards[:]:
+        for card in self._all_cards[:]:
             self.card_layout.removeWidget(card)
             card.setParent(None)
             card.deleteLater()
+        self._all_cards.clear()
         self.cards.clear()
         self._update_count()
-    
+
     def _update_count(self):
         """Update the count badge."""
-        self.count_label.setText(str(len(self.cards)))
+        visible = len(self.cards)
+        total = len(self._all_cards)
+        if visible == total:
+            self.count_label.setText(str(total))
+        else:
+            self.count_label.setText(f"{visible}/{total}")

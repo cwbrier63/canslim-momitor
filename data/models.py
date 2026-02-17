@@ -102,6 +102,11 @@ class Position(Base):
     fund_count = Column(Integer)
     prior_fund_count = Column(Integer)          # Prior quarter fund count (for calculating funds_qtr_chg)
 
+    # Company Info (from Polygon /v3/reference/tickers)
+    company_name = Column(String(100))          # Full company name
+    industry = Column(String(100))              # SIC description (e.g. "Semiconductors")
+    sector = Column(String(50))                 # Derived from SIC code (e.g. "Manufacturing")
+
     # Industry & Sector Data (MarketSurge - Industry Panel)
     industry_rank = Column(Integer)             # NEW: 1-197 ranking (replaces group_rank)
     industry_stock_count = Column(Integer)      # NEW: Stocks in industry group
@@ -845,3 +850,146 @@ def seed_default_config(session: Session):
                 description=description
             ))
     session.commit()
+
+
+# ======================================================================
+# Provider Abstraction Layer Tables
+# ======================================================================
+
+class ProviderConfig(Base):
+    """
+    Data provider configuration.
+
+    One row per provider *instance* — a single provider connection serving
+    exactly one domain (historical, realtime, or futures).  Providers that
+    serve multiple domains (e.g. IBKR) get one row per domain; the factory
+    detects matching connection settings and shares the underlying client.
+
+    Examples:
+        name="massive_historical"  provider_type="historical"  implementation="massive"
+        name="ibkr_realtime"       provider_type="realtime"    implementation="ibkr"
+        name="ibkr_futures"        provider_type="futures"     implementation="ibkr"
+    """
+    __tablename__ = 'provider_config'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String(50), nullable=False, unique=True, index=True)
+    display_name = Column(String(100))
+    provider_type = Column(String(20), nullable=False, index=True)  # historical, realtime, futures
+    implementation = Column(String(50), nullable=False)  # Registry key: massive, ibkr, schwab, …
+    enabled = Column(Boolean, default=True)
+    priority = Column(Integer, default=0)  # Lower = preferred (for failover)
+
+    # Connection settings — JSON blob with provider-specific keys
+    # e.g. {"base_url": "https://api.polygon.io", "timeout": 30}
+    # e.g. {"host": "127.0.0.1", "port": 4001, "client_id": 20}
+    settings = Column(Text, nullable=False, default='{}')
+
+    # Throttle / rate-limit configuration
+    tier_name = Column(String(50))  # e.g. "starter", "pro"
+    calls_per_minute = Column(Integer)
+    burst_size = Column(Integer, default=0)
+    min_delay_seconds = Column(Float, default=0.0)
+
+    created_at = Column(DateTime, default=func.now())
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
+
+    # Relationships
+    credentials = relationship(
+        "ProviderCredential",
+        back_populates="provider",
+        cascade="all, delete-orphan",
+    )
+
+    __table_args__ = (
+        Index('idx_provider_type_enabled', 'provider_type', 'enabled'),
+    )
+
+    def get_settings(self) -> dict:
+        """Return settings as a Python dict."""
+        import json
+        return json.loads(self.settings) if self.settings else {}
+
+    def set_settings(self, data: dict):
+        """Serialize a dict into the settings column."""
+        import json
+        self.settings = json.dumps(data)
+
+    def __repr__(self):
+        return (
+            f"<ProviderConfig(name='{self.name}', type='{self.provider_type}', "
+            f"impl='{self.implementation}', enabled={self.enabled})>"
+        )
+
+
+class ProviderCredential(Base):
+    """
+    Credentials for a data provider (API key, OAuth tokens, etc.).
+
+    Stored separately from ProviderConfig so that:
+    - Credentials can be encrypted at rest (Phase 10)
+    - OAuth tokens can be refreshed independently
+    - Multiple credential types per provider are supported
+
+    credential_type examples: api_key, oauth_access_token, oauth_refresh_token
+    """
+    __tablename__ = 'provider_credentials'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    provider_id = Column(
+        Integer,
+        ForeignKey('provider_config.id', ondelete='CASCADE'),
+        nullable=False,
+    )
+    credential_type = Column(String(30), nullable=False)  # api_key, oauth_access_token, …
+    credential_value = Column(Text, nullable=False)  # Plain-text for now; encrypted in Phase 10
+    is_encrypted = Column(Boolean, default=False)
+    expires_at = Column(DateTime)  # For OAuth tokens
+
+    created_at = Column(DateTime, default=func.now())
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
+
+    # Relationships
+    provider = relationship("ProviderConfig", back_populates="credentials")
+
+    __table_args__ = (
+        UniqueConstraint('provider_id', 'credential_type', name='uq_provider_credential_type'),
+        Index('idx_credential_provider', 'provider_id'),
+    )
+
+    def __repr__(self):
+        return (
+            f"<ProviderCredential(provider_id={self.provider_id}, "
+            f"type='{self.credential_type}', encrypted={self.is_encrypted})>"
+        )
+
+
+class ProviderHealthLog(Base):
+    """
+    Append-only health log for provider uptime tracking.
+
+    One row per health check / status change.  Used for dashboards and
+    to inform failover decisions.
+    """
+    __tablename__ = 'provider_health_log'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    provider_id = Column(
+        Integer,
+        ForeignKey('provider_config.id', ondelete='CASCADE'),
+        nullable=False,
+    )
+    status = Column(String(20), nullable=False)  # active, degraded, down, rate_limited
+    latency_ms = Column(Float)
+    error_message = Column(Text)
+    recorded_at = Column(DateTime, default=func.now(), nullable=False)
+
+    __table_args__ = (
+        Index('idx_health_log_provider_time', 'provider_id', 'recorded_at'),
+    )
+
+    def __repr__(self):
+        return (
+            f"<ProviderHealthLog(provider_id={self.provider_id}, "
+            f"status='{self.status}', at='{self.recorded_at}')>"
+        )

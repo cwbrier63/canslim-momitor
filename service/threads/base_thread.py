@@ -58,12 +58,15 @@ class BaseThread(threading.Thread, ABC):
         logger: Optional[logging.Logger] = None
     ):
         super().__init__(name=name, daemon=True)
-        
+
         self.thread_name = name
         self.shutdown_event = shutdown_event
         self.poll_interval = poll_interval
         self.logger = logger or logging.getLogger(f'canslim.{name}')
-        
+
+        # Market calendar — set via _init_market_calendar() or by ServiceController
+        self._market_calendar = None
+
         # Statistics tracking
         self._stats = ThreadStats(name=name)
         self._stats_lock = threading.Lock()
@@ -131,26 +134,65 @@ class BaseThread(threading.Thread, ABC):
         """
         return True
     
+    def _init_market_calendar(self, config: dict = None):
+        """Initialize MarketCalendar from config if not already set."""
+        if self._market_calendar is not None:
+            return
+        try:
+            from ...utils.market_calendar import get_market_calendar
+            api_key = (config or {}).get('polygon', {}).get('api_key', '')
+            self._market_calendar = get_market_calendar(api_key=api_key)
+        except Exception as e:
+            self.logger.debug(f"MarketCalendar init failed, using fallback: {e}")
+
     def _is_market_hours(self) -> bool:
-        """Check if currently in US market hours (9:30 AM - 4:00 PM ET)."""
+        """Check if currently in US market hours using MarketCalendar.
+
+        Uses Polygon API for real-time status (handles holidays, early closes).
+        Falls back to hardcoded 9:30-4:00 ET weekday check if unavailable.
+        """
+        if self._market_calendar:
+            try:
+                return self._market_calendar.is_market_open()
+            except Exception as e:
+                self.logger.debug(f"MarketCalendar.is_market_open() failed: {e}")
+
+        # Fallback: basic weekday + time check (no holiday awareness)
         from datetime import datetime
         try:
             import pytz
             et = pytz.timezone('US/Eastern')
             now = datetime.now(et)
         except ImportError:
-            # Fallback if pytz not available
             now = datetime.now()
-        
-        # Skip weekends
+
         if now.weekday() >= 5:
             return False
-        
-        # Check time (9:30 AM to 4:00 PM)
+
         market_open = now.replace(hour=9, minute=30, second=0, microsecond=0)
         market_close = now.replace(hour=16, minute=0, second=0, microsecond=0)
-        
         return market_open <= now <= market_close
+
+    def _is_trading_day(self) -> bool:
+        """Check if today is a trading day (not weekend, not holiday).
+
+        Uses MarketCalendar for holiday awareness.
+        Falls back to weekday-only check if unavailable.
+        """
+        if self._market_calendar:
+            try:
+                return self._market_calendar.is_trading_day()
+            except Exception as e:
+                self.logger.debug(f"MarketCalendar.is_trading_day() failed: {e}")
+
+        # Fallback: weekday-only check
+        from datetime import datetime
+        try:
+            import pytz
+            now = datetime.now(pytz.timezone('US/Eastern'))
+        except ImportError:
+            now = datetime.now()
+        return now.weekday() < 5
     
     def _update_cycle_time(self, cycle_ms: float):
         """Update rolling average cycle time."""

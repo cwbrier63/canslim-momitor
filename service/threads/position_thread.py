@@ -47,7 +47,9 @@ class PositionThread(BaseThread):
         ibkr_client=None,
         discord_notifier=None,
         config: Dict[str, Any] = None,
-        logger: Optional[logging.Logger] = None
+        logger: Optional[logging.Logger] = None,
+        # Provider abstraction layer (Phase 6)
+        realtime_provider=None,
     ):
         super().__init__(
             name="position",
@@ -59,6 +61,9 @@ class PositionThread(BaseThread):
         self.db_session_factory = db_session_factory
         self.ibkr_client = ibkr_client
         self.discord_notifier = discord_notifier
+
+        # Provider abstraction layer — prefers provider over raw client
+        self.realtime_provider = realtime_provider
         
         # Load config
         if config is None:
@@ -200,12 +205,46 @@ class PositionThread(BaseThread):
             return []
     
     def _get_prices(self, symbols: List[str]) -> Dict[str, Dict[str, Any]]:
-        """Get current prices and volume from IBKR."""
+        """Get current prices and volume from realtime provider (or IBKR fallback)."""
+        # Prefer provider abstraction — returns canonical Quote objects
+        if self.realtime_provider and self.realtime_provider.is_connected():
+            try:
+                provider_quotes = self.realtime_provider.get_quotes(symbols)
+                if provider_quotes:
+                    price_data = {}
+                    for symbol, quote in provider_quotes.items():
+                        if quote:
+                            qd = quote.to_dict()
+                            if qd.get('last', 0) > 0:
+                                price = qd['last']
+                                volume = qd.get('volume', 0)
+                                avg_volume = qd.get('avg_volume', 500000)
+                                volume_ratio = volume / avg_volume if avg_volume > 0 else 1.0
+
+                                max_price = self._max_prices.get(symbol, price)
+                                if price > max_price:
+                                    self._max_prices[symbol] = price
+                                    max_price = price
+
+                                price_data[symbol] = {
+                                    'price': price,
+                                    'volume_ratio': volume_ratio,
+                                    'max_price': max_price,
+                                    'max_gain_pct': self._max_gains.get(symbol, 0),
+                                    'high': qd.get('high', price),
+                                    'low': qd.get('low', price),
+                                    'open': qd.get('open', price),
+                                }
+                    if price_data:
+                        return price_data
+            except Exception as e:
+                self.logger.warning(f"Provider get_quotes failed: {e}, falling back to raw client")
+
         if not self.ibkr_client:
             return {}
-        
+
         price_data = {}
-        
+
         # Try batch quote first (more efficient)
         if hasattr(self.ibkr_client, 'get_quotes'):
             try:
